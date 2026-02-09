@@ -10,14 +10,16 @@ def gaussian_sphere_aabb(
     scales: ti.math.vec3,
     quaternion: ti.math.vec4,
     critical_value: ti.f32 = 7.8147
-) -> (ti.math.vec3, ti.math.vec3):
+) -> (ti.math.vec3, ti.math.vec3, ti.math.vec3):
 
     min_corner = center
     max_corner = center
     
-    rotation = quaternion_to_rotation_ti(quaternion)
+    rotation = quaternion_to_rotation_ti(quaternion.normalized())
     
     sqrt_c = ti.sqrt(critical_value)
+    
+    extents = ti.math.vec3([0.0, 0.0, 0.0])
     
     for axis in ti.static(range(3)):
         L = 0.0
@@ -26,12 +28,18 @@ def gaussian_sphere_aabb(
             L += R_ai * R_ai * scales[i] * scales[i]
         
         half_extent = sqrt_c * ti.sqrt(L)
+        extents[axis] = half_extent * 2.0
 
         min_corner[axis] -= half_extent
         max_corner[axis] += half_extent
     
-    return min_corner, max_corner
-
+    # Sort extents in descending order (max, mid, min)
+    sorted_extents = ti.math.vec3([0.0, 0.0, 0.0])
+    sorted_extents[0] = ti.max(ti.max(extents[0], extents[1]), extents[2])
+    sorted_extents[2] = ti.min(ti.min(extents[0], extents[1]), extents[2])
+    sorted_extents[1] = extents[0] + extents[1] + extents[2] - sorted_extents[0] - sorted_extents[2]
+    
+    return min_corner, max_corner, sorted_extents
 
 @ti.kernel
 def gaussian_scene_aabb(
@@ -41,6 +49,7 @@ def gaussian_scene_aabb(
     # output
     min_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),    # [num_gaussians, 3]
     max_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),    # [num_gaussians, 3]
+    radius: ti.types.ndarray(dtype=ti.f32, ndim=2),         # [num_gaussians, 3]
     confidence_level: float = 0.95
 ):
     critical_value = approximate_chi_2_critical_value(confidence_level)
@@ -57,7 +66,7 @@ def gaussian_scene_aabb(
             quaternions[idx][0], quaternions[idx][1], quaternions[idx][2], quaternions[idx][3]    
         ])
         
-        min_corner, max_corner = gaussian_sphere_aabb(
+        min_corner, max_corner, radius_values = gaussian_sphere_aabb(
             center=center,
             scales=scale,
             quaternion=quaternion,
@@ -65,6 +74,7 @@ def gaussian_scene_aabb(
         )
         
         for i in ti.static(range(3)):
+            radius[idx][i] = radius_values[i]
             min_corners[idx][i] = min_corner[i]
             max_corners[idx][i] = max_corner[i]
             
@@ -107,14 +117,15 @@ def robust_global_scene_aabb(
         global_min_corner (torch.Tensor): minimum corner of the robust global AABB, shape (3,)
         global_max_corner (torch.Tensor): maximum corner of the robust global AABB, shape (3,)
     """
+    q_min = torch.quantile(min_corners, clip_quantile, dim=0)
+    q_max = torch.quantile(max_corners, 1.0 - clip_quantile, dim=0)
     
-    all_corners = torch.cat([min_corners, max_corners], dim=0)
-    
-    q_min = torch.quantile(all_corners, clip_quantile, dim=0)
-    q_max = torch.quantile(all_corners, (1 - clip_quantile), dim=0)
-    
+    # enforce that bbox have non-zreo size
+    q_max = torch.maximum(q_max, q_min + 1e-5)
+
     center = (q_min + q_max) / 2.0
     size = (q_max - q_min) * (1.0 + padding_factor)
+    
     global_min_corner = center - size / 2.0
     global_max_corner = center + size / 2.0
     
