@@ -1,0 +1,95 @@
+name: Running experiment
+
+on:
+ 
+  pull_request:
+    types: [ labeled ]
+
+jobs:
+  check-label-prefix:
+    runs-on: ubuntu-latest
+    env:
+      LABEL_NAME: ${{ github.event.label.name }}
+    outputs:
+      need_experiment: ${{ steps.check.outputs.need_experiment }}
+      label_name: ${{ env.LABEL_NAME }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - id: check
+        run: |
+          LABEL_NAME=$LABEL_NAME
+          PREFIX="need_experiment"
+          
+          if [[ "$LABEL_NAME" == "$PREFIX"* ]]; then
+            echo "need_experiment=true"
+            echo "need_experiment=true" >> $GITHUB_OUTPUT
+          else
+            echo "need_experiment=false" >> $GITHUB_OUTPUT
+          fi
+  
+  build:
+    needs: check-label-prefix
+    if: needs.check-label-prefix.outputs.need_experiment == 'true'
+    name: Run experiment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+   
+    steps:
+
+    - name: Check out code
+      uses: actions/checkout@v2
+      
+    - name: Get the branch name
+      id: get-branch-name
+      run: echo "::set-output name=BRANCH_NAME::$(echo ${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}})"
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-2
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: taichi_3d_gaussian_splatting
+        # use the branch name for the Docker tag
+        IMAGE_TAG: ${{ steps.get-branch-name.outputs.BRANCH_NAME }}
+      run: |
+        aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 763104351884.dkr.ecr.us-east-2.amazonaws.com
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f Dockerfile.aws .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "::set-output name=image_uri::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+    
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+    - run: pip3 install sagemaker argparse PyGithub boto3 sagemaker-experiments
+
+    - name: Run the experiment
+      id: run-experiment
+      env:
+        GITHUB_OWNER: ${{ github.repository_owner }}
+        GITHUB_REPO: ${{ github.repository }}
+        GITHUB_SHA: ${{ github.sha }}
+        BRANCH_NAME: ${{ steps.get-branch-name.outputs.BRANCH_NAME }}
+        GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+        LABEL_NAME: ${{ needs.check-label-prefix.outputs.label_name }}
+      run: |
+        python3 ci/run_experiment.py
+        

@@ -1,0 +1,182 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "visualize",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/visualizer.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--parquet_path_list",
+                "/home/kuangyuan/hdd/Development/taichi_3d_gaussian_splatting/logs/tat_truck_every_8_experiment/scene_29000.parquet",
+                "/home/kuangyuan/hdd/Development/taichi_3d_gaussian_splatting/logs/boots_super_sparse_experiment/scene_19000.parquet"
+            ]
+        },
+        {
+            "name": "prepare_BlenderNerf",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/prepare_InstantNGP_with_mesh.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--transforms_train",
+                "/home/kuangyuan/hdd/datasets/nerf_gen/origin_blendernerf/transforms_train.json",
+                "--mesh_path",
+                "/home/kuangyuan/hdd/datasets/nerf_gen/origin_blendernerf/Boots.stl",
+                "--output_path",
+                "/home/kuangyuan/hdd/datasets/nerf_gen/origin_blendernerf/output"
+            ]
+        },
+
+        {
+            "name": "gen config template",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "--train_config",
+                "config/config_template.yaml",
+                "--gen_template_only",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "kitti train",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/kitti_config.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "kitti train super sparse",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/kitti_config_super_sparse.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "tat train training",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/tat_train.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "tat truck training",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/tat_truck.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "tat truck training every 8 test",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/tat_truck_every_8_test.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "tat m60 training",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/tat_m60.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "tat playground training",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/tat_playground.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "boots train",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/boots_config.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "boots sparse train",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/boots_sparse_config.yaml",
+            ],
+            "preLaunchTask": "install"
+        },
+        {
+            "name": "boots super sparse train",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/gaussian_point_train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--train_config",
+                "config/boots_super_sparse_config.yaml",
+            ],
+            "preLaunchTask": "install"
+        }
+    ]
+}
