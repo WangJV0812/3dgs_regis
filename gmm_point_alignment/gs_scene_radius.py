@@ -16,7 +16,7 @@ def gaussian_sphere_radius(
     mid_v = a + b + c - max_v - min_v
     sqrt_critical_value = ti.sqrt(critical_value)
     
-    
+
     return ti.math.vec3([
         sqrt_critical_value * max_v,
         sqrt_critical_value * mid_v,
@@ -90,3 +90,27 @@ def compute_gaussian_scene_average_max_radii(
     average_max_radius = torch.mean(radius[:, 0])
 
     return average_max_radius.item()
+
+
+def compute_gaussian_scene_median_max_radii(
+    scene: GaussianScenes,
+    confidence_level: float = 0.95
+) -> float:
+    """compute the median maximum radius of the Gaussian scene, which can be used as a reference for point cloud alignment.
+
+    Args:
+        scene (GaussianScenes): the input Gaussian scene
+        confidence_level (float, optional): confidence level for the chi-squared distribution. Defaults to 0.95.
+    """
+    
+    radius = torch.zeros_like(scene.scales)
+    
+    gaussian_scene_radius(
+        scales=scene.scales,
+        radius=radius,
+        confidence_level=confidence_level,
+    )
+    
+    median_max_radius = torch.median(radius[:, 0])
+
+    return median_max_radius.item()
