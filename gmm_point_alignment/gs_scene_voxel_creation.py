@@ -35,8 +35,7 @@ class GaussianSceneGridCreator:
         self.config = config
         self.grid_g_ids = ti.field(dtype=ti.i32)
         
-        self.current_voxel_size = ti.field(dtype=ti.f32, shape=())
-        self.corrent_voxel_size = 1.0
+        self.voxel_size_field = ti.field(dtype=ti.f32, shape=())
         
         # normal sphere radius, which using a hash snode to store
         self.root = ti.root.hash(ti.ijk, self.config.max_active_cells)
@@ -135,32 +134,34 @@ class GaussianSceneGridCreator:
     ):
         self._clear_grid_kernel()
         
-        self.voxel_size = self._calculate_voxel_size_and_sphere_aabb(scene)
-        
+        voxel_size = self._calculate_voxel_size_and_sphere_aabb(scene)
+        self.voxel_size_field[None] = voxel_size
+
         self.insert_gaussian_sphere_kernel(
             min_corners=self.min_corners.contiguous(),
             max_corners=self.max_corners.contiguous(),
-            voxel_size=self.voxel_size,
+            voxel_size=voxel_size,
         )
 
 
     @ti.func
     def position_to_grid(self, position: ti.math.vec3) -> ti.math.ivec3:
-        return ti.floor(position / self.voxel_size).cast(ti.i32)
+        return ti.floor(position / self.voxel_size_field[None]).cast(ti.i32)
     
 
     @ti.kernel
-    def query_best_point_kernel(
+    def query_topk_sphere_kernel(
         self,
-        positions: ti.types.ndarray(dtype=ti.f32, ndim=2),  # [num_points, 3]
-        scales: ti.types.ndarray(dtype=ti.f32, ndim=2),         # [num_gaussians, 3]
-        quaternions: ti.types.ndarray(dtype=ti.f32, ndim=2),        # [num_gaussians, 4]
-        sorted_points: ti.types.ndarray(dtype=ti.f32, ndim=2),  # [num_points, 3]
+        positions: ti.types.ndarray(dtype=ti.f32, ndim=2),              # [num_points, 3]
+        scales: ti.types.ndarray(dtype=ti.f32, ndim=2),                 # [num_gaussians, 3]
+        quaternions: ti.types.ndarray(dtype=ti.f32, ndim=2),            # [num_gaussians, 4]
+        sorted_points: ti.types.ndarray(dtype=ti.f32, ndim=2),          # [num_points, 3]
         # middle
         tmp_sphere_covariance: ti.types.ndarray(dtype=ti.f32, ndim=3),  # [num_gaussians, 3, 3]
         # output
-        sphere_relation: ti.types.ndarray(dtype=ti.f32, ndim=1),  # [num_points]    
-        best_probabilitys: ti.types.ndarray(dtype=ti.f32, ndim=1)=None,  # [num_points]    
+        topk_sphere_relation: ti.types.ndarray(dtype=ti.f32, ndim=2),   # [num_points, k]    
+        topk_probabilitys: ti.types.ndarray(dtype=ti.f32, ndim=2),      # [num_points, k]    
+        K: ti.i32 = 8,
     ):
         """ build a point-to-sphere association list for each point, witch will find the spheres with highest confidence for each point, and store the relation in the sphere_relation list.
 
@@ -168,10 +169,11 @@ class GaussianSceneGridCreator:
             positions (ti.types.ndarray): positions of the Gaussian spheres, shape (num_gaussians, 3).
             scales (ti.types.ndarray): scales of the Gaussian spheres, shape (num_gaussians, 3).
             quaternions (ti.types.ndarray): quaternions of the Gaussian spheres, shape (num_gaussians, 4).
-            sorted_points (ti.types.ndarray): points list sorted by mortoncode for spatial locality. Defaults to ti.f32, ndim=2).
-            tmp_sphere_covariance (ti.types.ndarray): temporary storage for sphere covariance matrices, needed torch help to manage this memory. Defaults to ti.f32, ndim=3).
-            sphere_relation (ti.types.ndarray): output lists of sphere id for each point sorted in mortoncode order. Defaults to ti.f32, ndim=1).
-            best_probabilitys (ti.types.ndarray): output list of best confidence for each point. Defaults to None, which means we will not calculate the confidence.
+            sorted_points (ti.types.ndarray): points list sorted by mortoncode for spatial locality. shape (num_points, 3).
+            tmp_sphere_covariance (ti.types.ndarray): temporary storage for sphere covariance matrices, needed torch help to manage this memory. shape (num_gaussians, 3, 3).
+            topk_sphere_relation (ti.types.ndarray): output lists of sphere id for each point sorted in mortoncode order. shape (num_points, k).
+            topk_probabilitys (ti.types.ndarray): output list of best confidence for each point. shape (num_points, k).
+            K (int): number of top-k spheres to find for each point, can use ti.static forcing taichi kernel expand the loop. Defaults to 8.
         """
         
         # step 1: pre-compute the covariance matrix for each sphere, which will be used to calculate the confidence for each point-sphere pair.
@@ -192,66 +194,74 @@ class GaussianSceneGridCreator:
                 tmp_sphere_covariance[sphere_idx, i, j] = covariance[i, j]
                 
 
-        # step 2: for each point, find the spheres in the same voxel, calculate the confidence, and find the sphere with highest confidence as the relation.
+        # step 2: per-point top-k search
         point_counts = sorted_points.shape[0]
 
         for point_idx in range(point_counts):
             point = ti.math.vec3([
-                sorted_points[point_idx, 0], sorted_points[point_idx, 1], sorted_points[point_idx, 2]    
+                sorted_points[point_idx, 0], sorted_points[point_idx, 1], sorted_points[point_idx, 2]
             ])
-        
+
             grid_coord = self.position_to_grid(point)
-            
+
+            # init topk
+            topk_ids = ti.Vector([-1 for _ in range(32)])  # assume K <= 32
+            topk_vals = ti.Vector([0.0 for _ in range(32)])
+
             grid_sphere_counts = self.pixel[grid_coord.x, grid_coord.y, grid_coord.z].length()
-            
-            found_relation_id = -1
-            highest_confidence = 0.0
-            
-            for sphere_idx in range(grid_sphere_counts):
-                g_id = self.pixel[grid_coord.x, grid_coord.y, grid_coord.z][sphere_idx]
+
+            # scan voxel spheres
+            for sphere_local_idx in range(grid_sphere_counts):
+                g_id = self.pixel[grid_coord.x, grid_coord.y, grid_coord.z][sphere_local_idx]
+
                 local_covariance = ti.Matrix.zero(ti.f32, 3, 3)
-                
                 for i, j in ti.static(ti.ndrange(3, 3)):
                     local_covariance[i, j] = tmp_sphere_covariance[g_id, i, j]
-                
+
                 diff = point - ti.math.vec3([
-                    positions[g_id, 0], positions[g_id, 1], positions[g_id, 2]    
+                    positions[g_id, 0], positions[g_id, 1], positions[g_id, 2]
                 ])
-                
-                confidence = unnormalized_gaussian_density_ti(
-                    diff=diff,
-                    covariance=local_covariance,
-                )
-                
-                found_relation_id = ti.select(confidence > highest_confidence, g_id, found_relation_id)
-                highest_confidence = ti.max(confidence, highest_confidence)
-            
-        
-            # step 3: for points that have no relation in the voxel, we need to check the oversized spheres, which is stored in a separate list, and find the one with highest confidence as the relation.
+
+                confidence = unnormalized_gaussian_density_ti(diff=diff, covariance=local_covariance)
+
+                # insert into topk
+                for k in range(K):
+                    if confidence > topk_vals[k]:
+                        for j in range(K - 1, k, -1):
+                            topk_vals[j] = topk_vals[j - 1]
+                            topk_ids[j] = topk_ids[j - 1]
+                        topk_vals[k] = confidence
+                        topk_ids[k] = g_id
+                        break
+
+            # oversized spheres
             oversized_counts = self.oversized_list.length()
-                        
             for oversized_idx in range(oversized_counts):
                 g_id = self.oversized_g_ids[oversized_idx]
+
                 local_covariance = ti.Matrix.zero(ti.f32, 3, 3)
-                
                 for i, j in ti.static(ti.ndrange(3, 3)):
                     local_covariance[i, j] = tmp_sphere_covariance[g_id, i, j]
-                
-                diff = point - ti.math.vec3([
-                    positions[g_id, 0], positions[g_id, 1], positions[g_id, 2]    
-                ])
-                
-                confidence = unnormalized_gaussian_density_ti(
-                    diff=diff,
-                    covariance=local_covariance,
-                )
-                
-                found_relation_id = ti.select(confidence > highest_confidence, g_id, found_relation_id)
-                highest_confidence = ti.max(confidence, highest_confidence)
-                
 
-            sphere_relation[point_idx] = found_relation_id
-            best_probabilitys[point_idx] = highest_confidence
+                diff = point - ti.math.vec3([
+                    positions[g_id, 0], positions[g_id, 1], positions[g_id, 2]
+                ])
+
+                confidence = unnormalized_gaussian_density_ti(diff=diff, covariance=local_covariance)
+
+                for k in range(K):
+                    if confidence > topk_vals[k]:
+                        for j in range(K - 1, k, -1):
+                            topk_vals[j] = topk_vals[j - 1]
+                            topk_ids[j] = topk_ids[j - 1]
+                        topk_vals[k] = confidence
+                        topk_ids[k] = g_id
+                        break
+
+            # write back
+            for k in range(K):
+                topk_sphere_relation[point_idx, k] = ti.cast(topk_ids[k], ti.f32)
+                topk_probabilitys[point_idx, k] = topk_vals[k]
 
 
 
@@ -300,19 +310,20 @@ class GaussianPointMatcher(torch.nn.Module):
         )
         
         # step 3. query the grid to find the sphere relation for each point
-        sphere_relations = torch.zeros(pointcloud.shape[0], dtype=torch.int32)
-        best_probabilitys = torch.zeros(pointcloud.shape[0], dtype=torch.float32)
+        K = 8
+        sphere_relations = torch.full((pointcloud.shape[0], K), -1, dtype=torch.int32)
+        best_probabilitys = torch.zeros((pointcloud.shape[0], K), dtype=torch.float32)
         
         tmp_covariances = torch.zeros((scene.position.shape[0], 3, 3), dtype=torch.float32)
         
-        self.grid_creator.query_best_point_kernel(
+        self.grid_creator.query_topk_sphere_kernel(
             positions=scene.position.contiguous(),
             scales=scene.scales.contiguous(),
             quaternions=scene.rotation.contiguous(),
             sorted_points=sorted_code_dict['sorted_pointcloud'].contiguous(),
             tmp_sphere_covariance=tmp_covariances,
-            sphere_relation=sphere_relations,
-            best_probabilitys=best_probabilitys,
+            topk_sphere_relation=sphere_relations,
+            topk_probabilitys=best_probabilitys,
         )
         
         del tmp_covariances
@@ -322,7 +333,7 @@ class GaussianPointMatcher(torch.nn.Module):
             'sphere_relations': sphere_relations,
             'best_probabilitys': best_probabilitys,
             'grid_info': {
-                'voxel_size': self.grid_creator.voxel_size,
+                'voxel_size': self.grid_creator.voxel_size_field[None],
                 'oversized_sphere_count': self.grid_creator.oversized_list.length(),
             }
         }
