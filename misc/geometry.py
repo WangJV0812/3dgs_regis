@@ -193,3 +193,68 @@ def project_point_to_camera(
         uv_camera[0], uv_camera[1], point_camera[2]
     ])
 
+
+@ti.func
+def compute_gaussian_covariance(
+    scale: ti.math.vec3,
+    rotation: ti.math.vec4
+)-> ti.math.mat3:
+    """Compute the covariance matrix of a Gaussian sphere given its scale and rotation.
+
+    Args:
+        scale (ti.math.vec3): Scale of the Gaussian sphere along x, y, z axes.
+        rotation (ti.math.vec4): Rotation of the Gaussian sphere represented as a quaternion.
+
+    Returns:
+        ti.math.mat3: Covariance matrix of the Gaussian sphere.
+    """
+    R = quaternion_to_rotation_ti(rotation)
+    S = ti.math.mat3([[scale[0] * scale[0], 0.0, 0.0],
+                      [0.0, scale[1] * scale[1], 0.0],
+                      [0.0, 0.0, scale[2] * scale[2]]])
+    
+    covariance = R @ S @ S.transpose() @ R.transpose()
+    
+    return covariance
+
+
+@ti.func
+def gaussian_density_ti(
+    diff: ti.math.vec3,
+    covariance: ti.math.mat3,
+) -> ti.f32:
+    """Compute the density of a Gaussian sphere at a given position.
+
+    Args:
+        pos (ti.math.vec3): Position where the density is evaluated.
+        mean (ti.math.vec3): Mean of the Gaussian sphere.
+        covariance (ti.math.mat3): Covariance matrix of the Gaussian sphere.
+
+    Returns:
+        ti.f32: Density of the Gaussian sphere at the given position.
+    """
+    
+    exponent = -0.5 * (diff.transpose() @ covariance.inverse() @ diff)
+    normalization = 1.0 / ti.sqrt((2 * 3.14159265) ** 3 * covariance.determinant())
+    
+    return normalization * ti.exp(exponent)
+
+
+@ti.func
+def unnormalized_gaussian_density_ti(
+    diff: ti.math.vec3,
+    covariance: ti.math.mat3,
+) -> ti.f32:
+    """Compute the density of a Gaussian sphere at a given position.
+
+    Args:
+        pos (ti.math.vec3): Position where the density is evaluated.
+        mean (ti.math.vec3): Mean of the Gaussian sphere.
+        covariance (ti.math.mat3): Covariance matrix of the Gaussian sphere.
+
+    Returns:
+        ti.f32: Density of the Gaussian sphere at the given position.
+    """    
+    exponent = -0.5 * (diff.transpose() @ covariance.inverse() @ diff)
+    
+    return ti.exp(exponent)
