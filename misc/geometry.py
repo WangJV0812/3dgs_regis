@@ -298,7 +298,9 @@ def compute_gaussian_normalized_factor_cov_inv_ti(
     cov_inv: ti.math.mat3
 )-> ti.f32:
     det_cov = 1.0 / cov_inv.determinant()
-    if det_cov <= 0.0:
-        return 0.0
-    else:
-        return 1.0 / ti.sqrt((2 * 3.14159265) ** 3 * det_cov)
+    confidence = 0.0
+    
+    if det_cov > 1e-8:
+        confidence = 1.0 / ti.sqrt((2 * 3.14159265) ** 3 * det_cov)
+    
+    return confidence
