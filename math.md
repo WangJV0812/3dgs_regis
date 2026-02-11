@@ -92,11 +92,14 @@ In Vanilla 3DGS, we use sphere harmonics to represent the anisotropy of illumina
 for any poiny $\rm x_i$ in the point cloud, we can find the top-k density gaussian episodes in the gaussian scene $\{\mathcal G\}_{j_1, j_2, \cdots j_k}$. Leveraging the locality of the gaussian scene, for point $\rm x_i$，the whole gaussian scene can be approximated as a mixture of the top-k density gaussian episodes. The GMM Model can be represented as:
 
 $$
-\text{GMM}_i = \sum_{j \in \{j_1, j_2, \cdots j_k\}} w_j \mathcal G_j(\rm x_i)
+\text{GMM}_i = \sum_{j \in \{j_1, j_2, \cdots j_k\}} w_j \mathcal G_j(\rm x)
 $$
 
 In 3DGS scene, the weight $w_j$ is determined by the opacity of $j$-th gaussian episode $o_j$。Then the likelihood of point $\rm x_i$ can be represented as:
 
 $$
-\log p(x) = 
+\log p(\rm x_i) = \log \sum_{j \in \{j_1, j_2, \cdots j_k\}} w_j \mathcal G_j(\rm x)
 $$
+
+In registration task (means thart using mle to optimize a Rts between 3dgs scene and pointcloud), we do not needed to estimate the parameters in 3dgs scens, se the normalized of gmm model is not necessary actually.
+

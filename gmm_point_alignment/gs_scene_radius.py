@@ -1,5 +1,6 @@
 import taichi as ti
 import torch
+import math
 from misc.hier_IO import GaussianScenes
 
 
@@ -23,8 +24,20 @@ def gaussian_sphere_radius(
         sqrt_critical_value * min_v,
     ])
     
-    
 @ti.func
+def approximate_chi_2_critical_value_ti(
+    degrees_of_freedom: int, 
+    confidence_level: float = 0.95
+) -> ti.f32:
+    # using wilson-hilferty transformation to approximate chi-squared critical value
+    # c \approx df * (1 - 2/(9*df) + z * sqrt(2/(9*df)))^3
+    
+    z = 1 / (ti.abs(confidence_level) + 1e-10)  # avoid division by zero, though confidence_level should never be 0 or 1
+    df = degrees_of_freedom
+    
+    return df * (1 - 2/(9*df) + z * ti.sqrt(2/(9*df)))**3
+
+
 def approximate_chi_2_critical_value(
     degrees_of_freedom: int, 
     confidence_level: float = 0.95
@@ -32,17 +45,18 @@ def approximate_chi_2_critical_value(
     # using wilson-hilferty transformation to approximate chi-squared critical value
     # c \approx df * (1 - 2/(9*df) + z * sqrt(2/(9*df)))^3
     
-    z = ti.math.norm_inv(confidence_level)
+    z = 1 / (confidence_level + 1e-10)  # avoid division by zero, though confidence_level should never be 0 or 1
     df = degrees_of_freedom
     
-    return df * (1 - 2/(9*df) + z * ti.sqrt(2/(9*df)))**3
+    return df * (1 - 2/(9*df) + z * math.sqrt(2/(9*df)))**3
+
 
 
 @ti.kernel
 def gaussian_scene_radius(
     scales: ti.types.ndarray(dtype=ti.f32, ndim=2),  # [num_gaussians, 3]
     radius: ti.types.ndarray(dtype=ti.f32, ndim=2),  # [num_gaussians, 3]
-    confidence_level: float = 0.95
+    confidence_level: float
 ):
     """calcualte gaussian ellipsoid radii for three axes at confidence level, sorted as max, mid, min. The radius is calculated by multiplying the square root of the chi-squared critical value with the scales, which represent the covariance of the Gaussian distribution. The chi-squared critical value is determined by the confidence level and the degrees of freedom (which is 3 for 3D space).
 
@@ -52,11 +66,11 @@ def gaussian_scene_radius(
         confidence_level (float, optional): confidence level for the chi-squared distribution. Defaults to 0.95.
     """
     sphere_counts = scales.shape[0]
-    critical_value = approximate_chi_2_critical_value(3, confidence_level)
+    critical_value = approximate_chi_2_critical_value_ti(3, confidence_level)
     
     for idx in range(sphere_counts):
         sphere_scale = ti.math.vec3([
-            scales[idx][0], scales[idx][1], scales[idx][2]    
+            scales[idx, 0], scales[idx, 1], scales[idx, 2]    
         ])
         
         radii = gaussian_sphere_radius(
@@ -65,7 +79,7 @@ def gaussian_scene_radius(
         )
         
         for i in ti.static(range(3)):
-            radius[idx][i] = radii[i]
+            radius[idx, i] = radii[i]
         
         
 def compute_gaussian_scene_average_max_radii(

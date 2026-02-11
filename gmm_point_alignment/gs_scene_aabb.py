@@ -1,7 +1,7 @@
 import taichi as ti
 import torch
 from misc.geometry import quaternion_to_rotation_ti
-from gmm_point_alignment.gs_scene_radius import approximate_chi_2_critical_value
+from gmm_point_alignment.gs_scene_radius import approximate_chi_2_critical_value_ti
 
 
 @ti.func
@@ -50,20 +50,20 @@ def gaussian_scene_aabb(
     min_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),    # [num_gaussians, 3]
     max_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),    # [num_gaussians, 3]
     radius: ti.types.ndarray(dtype=ti.f32, ndim=2),         # [num_gaussians, 3]
-    confidence_level: float = 0.95
+    confidence_level: float,
 ):
-    critical_value = approximate_chi_2_critical_value(confidence_level)
+    critical_value = approximate_chi_2_critical_value_ti(3, confidence_level)
     sphere_counts = centers.shape[0]
     
     for idx in range(sphere_counts):
         center = ti.math.vec3([
-            centers[idx][0], centers[idx][1], centers[idx][2]    
+            centers[idx, 0], centers[idx, 1], centers[idx, 2]    
         ])
         scale = ti.math.vec3([
-            scales[idx][0], scales[idx][1], scales[idx][2]    
+            scales[idx, 0], scales[idx, 1], scales[idx, 2]    
         ])
         quaternion = ti.math.vec4([
-            quaternions[idx][0], quaternions[idx][1], quaternions[idx][2], quaternions[idx][3]    
+            quaternions[idx, 0], quaternions[idx, 1], quaternions[idx, 2], quaternions[idx, 3]    
         ])
         
         min_corner, max_corner, radius_values = gaussian_sphere_aabb(
@@ -74,9 +74,9 @@ def gaussian_scene_aabb(
         )
         
         for i in ti.static(range(3)):
-            radius[idx][i] = radius_values[i]
-            min_corners[idx][i] = min_corner[i]
-            max_corners[idx][i] = max_corner[i]
+            radius[idx, i] = radius_values[i]
+            min_corners[idx, i] = min_corner[i]
+            max_corners[idx, i] = max_corner[i]
             
 
 def global_scene_aabb(

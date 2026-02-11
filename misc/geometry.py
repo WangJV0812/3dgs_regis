@@ -219,6 +219,15 @@ def compute_gaussian_covariance(
 
 
 @ti.func
+def det_3x3_covariance_ti(S):
+    a, b, c = S[0,0], S[0,1], S[0,2]
+    d, e = S[1,1], S[1,2]
+    f = S[2,2]
+    
+    return (a*d*f + 2*b*c*e - a*e*e - d*c*c - f*b*b)
+
+
+@ti.func
 def gaussian_density_ti(
     diff: ti.math.vec3,
     covariance: ti.math.mat3,
@@ -235,7 +244,32 @@ def gaussian_density_ti(
     """
     
     exponent = -0.5 * (diff.transpose() @ covariance.inverse() @ diff)
+    det_cov = det_3x3_covariance_ti(covariance)
     normalization = 1.0 / ti.sqrt((2 * 3.14159265) ** 3 * covariance.determinant())
+    
+    return normalization * ti.exp(exponent)
+
+
+@ti.func
+def gaussian_density_cov_inv_ti(
+    diff: ti.math.vec3,
+    cov_inv: ti.math.mat3,
+    cov_det: ti.f32
+) -> ti.f32:
+    """Compute the density of a Gaussian sphere at a given position using pre-computed inverse covariance and determinant.
+
+    Args:
+        pos (ti.math.vec3): Position where the density is evaluated.
+        mean (ti.math.vec3): Mean of the Gaussian sphere.
+        cov_inv (ti.math.mat3): Inverse of the covariance matrix of the Gaussian sphere.
+        cov_det (ti.f32): Determinant of the covariance matrix of the Gaussian sphere.
+
+    Returns:
+        ti.f32: Density of the Gaussian sphere at the given position.
+    """
+    
+    exponent = -0.5 * (diff.transpose() @ cov_inv @ diff)
+    normalization = 1.0 / ti.sqrt((2 * 3.14159265) ** 3 * cov_det)
     
     return normalization * ti.exp(exponent)
 
@@ -258,3 +292,13 @@ def unnormalized_gaussian_density_ti(
     exponent = -0.5 * (diff.transpose() @ covariance.inverse() @ diff)
     
     return ti.exp(exponent)
+
+@ti.func
+def compute_gaussian_normalized_factor_cov_inv_ti(
+    cov_inv: ti.math.mat3
+)-> ti.f32:
+    det_cov = 1.0 / cov_inv.determinant()
+    if det_cov <= 0.0:
+        return 0.0
+    else:
+        return 1.0 / ti.sqrt((2 * 3.14159265) ** 3 * det_cov)
