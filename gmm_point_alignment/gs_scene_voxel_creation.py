@@ -176,7 +176,7 @@ class GaussianSceneGridCreator:
         # output
         topk_sphere_relation: ti.types.ndarray(dtype=ti.f32, ndim=2),   # [num_points, k]    
         topk_probabilities: ti.types.ndarray(dtype=ti.f32, ndim=2),      # [num_points, k]    
-        K: ti.i32,
+        K: ti.template(),
     ):
         """
         build a point-to-sphere association list for each point, witch will find the spheres with highest confidence for each point, and store the relation in the sphere_relation list.
@@ -235,7 +235,7 @@ class GaussianSceneGridCreator:
             topk_ids = ti.Vector([-1 for _ in range(32)])
             topk_vals = ti.Vector([0.0 for _ in range(32)])
 
-            grid_sphere_counts = self.grid_g_ids[grid_coord.x, grid_coord.y, grid_coord.z].length()
+            grid_sphere_counts = ti.length(self.pixel, [grid_coord.x, grid_coord.y, grid_coord.z])
 
             # scan voxel spheres
             for sphere_local_idx in range(grid_sphere_counts):
@@ -257,17 +257,18 @@ class GaussianSceneGridCreator:
                 )
 
                 # insert into topk
+                is_inserted = 0
                 for k in ti.static(range(K)):
-                    if confidence > topk_vals[k]:
-                        for j in range(K - 1, k, -1):
+                    if is_inserted == 0 and confidence > topk_vals[k]:
+                        for j in ti.static(range(K - 1, k, -1)):
                             topk_vals[j] = topk_vals[j - 1]
                             topk_ids[j] = topk_ids[j - 1]
                         topk_vals[k] = confidence
                         topk_ids[k] = g_id
-                        break
+                        is_inserted = 1
 
             # oversized spheres
-            oversized_counts = self.oversized_list.length()
+            oversized_counts = ti.length(self.oversized_list, [])
             for oversized_idx in range(oversized_counts):
                 g_id = self.oversized_g_ids[oversized_idx]
 
@@ -285,14 +286,15 @@ class GaussianSceneGridCreator:
                     cov_det=tmp_sphere_normalized_factor[g_id]
                 )
 
+                is_inserted = 0
                 for k in ti.static(range(K)):
-                    if confidence > topk_vals[k]:
-                        for j in range(K - 1, k, -1):
+                    if is_inserted == 0 and confidence > topk_vals[k]:
+                        for j in ti.static(range(K - 1, k, -1)):
                             topk_vals[j] = topk_vals[j - 1]
                             topk_ids[j] = topk_ids[j - 1]
                         topk_vals[k] = confidence
                         topk_ids[k] = g_id
-                        break
+                        is_inserted = 1
 
             # write back
             for k in ti.static(range(K)):

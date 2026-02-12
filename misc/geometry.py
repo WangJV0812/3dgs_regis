@@ -267,8 +267,7 @@ def gaussian_density_cov_inv_ti(
     Returns:
         ti.f32: Density of the Gaussian sphere at the given position.
     """
-    
-    exponent = -0.5 * (diff.transpose() @ cov_inv @ diff)
+    exponent = -0.5 * diff.dot(cov_inv @ diff)
     normalization = 1.0 / ti.sqrt((2 * 3.14159265) ** 3 * cov_det)
     
     return normalization * ti.exp(exponent)

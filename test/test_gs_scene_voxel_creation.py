@@ -140,7 +140,11 @@ class TestGaussianSceneGridCreator(unittest.TestCase):
         )
         
         # Check oversized list
-        length = self.get_oversized_count()
+        @ti.kernel
+        def get_oversized_cnt() -> int:
+            return ti.length(self.creator.oversized_list, [])
+
+        length = get_oversized_cnt()
         self.assertEqual(length, 1)
         
         @ti.kernel
