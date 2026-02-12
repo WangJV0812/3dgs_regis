@@ -20,7 +20,6 @@ def forward_point_gaussian_mle(
     normalized_factors: ti.types.ndarray(dtype=ti.f32, ndim=1),         # (M,)
     opacities: ti.types.ndarray(dtype=ti.f32, ndim=1),                  # (M,)
     # tmp
-    max_log_buffer: ti.types.ndarray(dtype=ti.f32, ndim=2),             # (N, K)
     alpha_buffer: ti.types.ndarray(dtype=ti.f32, ndim=1),               # (M,)
     # output
     log_likelihoods: ti.types.ndarray(dtype=ti.f32, ndim=1)             # (N,)
@@ -48,8 +47,9 @@ def forward_point_gaussian_mle(
         
         for k in ti.static(range(K)):
             if local_indices[k] < 0:
-                max_log_buffer[point_idx, k] = -1e10
+                sum_exp = sum_exp + (1e-8)  # if no valid sphere, add a small value to prevent log(0)
                 continue
+            
             sphere_idx = local_indices[k]
             
             diff = point - ti.math.vec3([

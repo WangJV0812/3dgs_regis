@@ -171,11 +171,11 @@ def load_hier_to_torch(
     boxes_np          = hier_data_np["boxes"]
     
     gaussian_scene = GaussianScenes(
-        position   = torch.from_numpy(gaussian_scene_np['position']).to(device),
-        rotation   = torch.from_numpy(gaussian_scene_np['rotation']).to(device),
-        scales     = torch.from_numpy(gaussian_scene_np['scales']).to(device),
-        opacities  = torch.from_numpy(gaussian_scene_np['opacities']).to(device),
-        shs        = torch.from_numpy(gaussian_scene_np['shs']).to(device),
+        position   = torch.from_numpy(gaussian_scene_np['position']).to(device, dtype=torch.float32),
+        rotation   = torch.from_numpy(gaussian_scene_np['rotation']).to(device, dtype=torch.float32),
+        scales     = torch.from_numpy(gaussian_scene_np['scales']).to(device, dtype=torch.float32),
+        opacities  = torch.from_numpy(gaussian_scene_np['opacities']).to(device, dtype=torch.float32),
+        shs        = torch.from_numpy(gaussian_scene_np['shs']).to(device, dtype=torch.float32),
     )
     
     hier_nodes = HierarchyNodes(

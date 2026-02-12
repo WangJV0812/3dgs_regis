@@ -187,7 +187,7 @@ class TestGaussianSceneGridCreator(unittest.TestCase):
         # Query point exactly at sphere 0 center
         sorted_points = torch.tensor([[5.0, 5.0, 5.0]], dtype=torch.float32)
         
-        topk_relations = torch.full((1, 2), -1, dtype=torch.float32) # Using float as in kernel signature
+        topk_relations = torch.full((1, 2), -1, dtype=torch.int32) # Using int as in kernel signature
         topk_probs = torch.zeros((1, 2), dtype=torch.float32)
         
         tmp_cov_inv = torch.zeros((2, 3, 3), dtype=torch.float32)
@@ -202,7 +202,7 @@ class TestGaussianSceneGridCreator(unittest.TestCase):
             sorted_points=sorted_points,
             tmp_sphere_covariance_inv=tmp_cov_inv,
             tmp_sphere_normalized_factor=tmp_norm,
-            topk_sphere_relation=topk_relations,
+            topk_sphere_relations=topk_relations,
             topk_probabilities=topk_probs,
             K=K
         )
