@@ -334,12 +334,12 @@ class CSRGridQuerier:
         id_to_idx[all_valid_ids] = torch.arange(len(all_valid_ids), device=device, dtype=torch.int32)
 
         compute_densities_kernel(
-            points=points,
-            candidate_ids=candidate_ids,
-            sphere_centers=unique_centers,
-            sphere_cov_inv=unique_cov_inv,
-            id_to_idx=id_to_idx,
-            densities=densities,
+            points=points.contiguous(),
+            candidate_ids=candidate_ids.contiguous(),
+            sphere_centers=unique_centers.contiguous(),
+            sphere_cov_inv=unique_cov_inv.contiguous(),
+            id_to_idx=id_to_idx.contiguous(),
+            densities=densities.contiguous(),
         )
 
         return densities

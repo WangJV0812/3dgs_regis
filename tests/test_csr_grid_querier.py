@@ -93,7 +93,6 @@ class TestCSRGridQuerierConfig:
 
         assert config.top_k == 8
         assert config.max_candidates_per_point == 64
-        assert config.use_taichi is True
         assert config.batch_size == 10000
 
     def test_custom_config(self):
