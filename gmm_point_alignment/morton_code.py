@@ -65,12 +65,179 @@ def Morton3D_kernel(
         morton_codes[i] = code
     
     
+# =============================================================================
+# Grid Coordinate Morton Encoding (for CSR Grid)
+# =============================================================================
+
+@ti.func
+def encode_grid_to_morton_ti(x: ti.i32, y: ti.i32, z: ti.i32) -> ti.u32:
+    """Encode grid coordinates (0-1023) directly to morton code.
+
+    Args:
+        x, y, z: Grid coordinates, must be in range [0, 1023]
+
+    Returns:
+        30-bit morton code
+    """
+    xi = ti.cast(ti.max(0, ti.min(x, 1023)), ti.u32)
+    yi = ti.cast(ti.max(0, ti.min(y, 1023)), ti.u32)
+    zi = ti.cast(ti.max(0, ti.min(z, 1023)), ti.u32)
+
+    return (expand_bits_10(xi) << 2) | (expand_bits_10(yi) << 1) | expand_bits_10(zi)
+
+
+@ti.func
+def decode_morton_to_grid_ti(code: ti.i64) -> ti.math.ivec3:
+    """Decode morton code to grid coordinates.
+
+    Args:
+        code: 30-bit morton code (passed as i64 for compatibility)
+
+    Returns:
+        Grid coordinates (x, y, z)
+    """
+    code_u32 = ti.cast(code, ti.u32)
+    x = compact_bits_10(code_u32 >> 2)
+    y = compact_bits_10(code_u32 >> 1)
+    z = compact_bits_10(code_u32)
+    return ti.math.ivec3([ti.cast(x, ti.i32), ti.cast(y, ti.i32), ti.cast(z, ti.i32)])
+
+
+@ti.kernel
+def grid_to_morton_kernel(
+    grid_coords: ti.types.ndarray(dtype=ti.i32, ndim=2),  # [N, 3]
+    morton_codes: ti.types.ndarray(dtype=ti.u32, ndim=1),  # [N]
+):
+    """Batch convert grid coordinates to morton codes.
+
+    Args:
+        grid_coords: Grid coordinates [N, 3], each in range [0, 1023]
+        morton_codes: Output morton codes [N]
+    """
+    for i in range(grid_coords.shape[0]):
+        x = grid_coords[i, 0]
+        y = grid_coords[i, 1]
+        z = grid_coords[i, 2]
+        morton_codes[i] = encode_grid_to_morton_ti(x, y, z)
+
+
+@ti.kernel
+def morton_to_grid_kernel(
+    morton_codes: ti.types.ndarray(dtype=ti.i64, ndim=1),  # [N] - use i64 to match pairs_morton
+    grid_coords: ti.types.ndarray(dtype=ti.i32, ndim=2),   # [N, 3]
+):
+    """Batch convert morton codes to grid coordinates.
+
+    Args:
+        morton_codes: Morton codes [N]
+        grid_coords: Output grid coordinates [N, 3]
+    """
+    for i in range(morton_codes.shape[0]):
+        coord = decode_morton_to_grid_ti(morton_codes[i])
+        grid_coords[i, 0] = coord[0]
+        grid_coords[i, 1] = coord[1]
+        grid_coords[i, 2] = coord[2]
+
+
+def grid_coords_to_morton(grid_coords: torch.Tensor) -> torch.Tensor:
+    """Convert grid coordinates to morton codes (Python wrapper).
+
+    Args:
+        grid_coords: Grid coordinates [N, 3], values in [0, 1023]
+
+    Returns:
+        Morton codes [N], dtype=torch.uint32
+    """
+    if grid_coords.ndim != 2 or grid_coords.shape[1] != 3:
+        raise ValueError(f"Expected [N, 3], got {grid_coords.shape}")
+
+    device = grid_coords.device
+    grid_coords = grid_coords.contiguous().to(torch.int32)
+    morton_codes = torch.empty((grid_coords.shape[0],), dtype=torch.uint32, device=device)
+
+    grid_to_morton_kernel(grid_coords, morton_codes)
+
+    return morton_codes
+
+
+def morton_to_grid_coords(morton_codes: torch.Tensor) -> torch.Tensor:
+    """Convert morton codes to grid coordinates (Python wrapper).
+
+    Args:
+        morton_codes: Morton codes [N], dtype=torch.int64 (from pairs_morton)
+
+    Returns:
+        Grid coordinates [N, 3], dtype=torch.int32
+    """
+    if morton_codes.ndim != 1:
+        raise ValueError(f"Expected [N], got {morton_codes.shape}")
+
+    device = morton_codes.device
+    morton_codes = morton_codes.contiguous().to(torch.int64)
+    grid_coords = torch.empty((morton_codes.shape[0], 3), dtype=torch.int32, device=device)
+
+    morton_to_grid_kernel(morton_codes, grid_coords)
+
+    return grid_coords
+
+
+def compute_morton_range(
+    grid_min: torch.Tensor,  # [3]
+    grid_max: torch.Tensor,  # [3]
+) -> tuple[int, int]:
+    """Compute the morton code range for a grid AABB.
+
+    This computes the minimum and maximum morton codes that could
+    be generated from coordinates within the given grid bounds.
+
+    Args:
+        grid_min: Minimum grid coordinates [3]
+        grid_max: Maximum grid coordinates [3]
+
+    Returns:
+        (morton_min, morton_max) tuple
+
+    Example:
+        >>> grid_min = torch.tensor([0, 0, 0])
+        >>> grid_max = torch.tensor([1, 1, 1])
+        >>> morton_min, morton_max = compute_morton_range(grid_min, grid_max)
+    """
+    device = grid_min.device
+
+    # Clamp to valid range
+    grid_min = torch.clamp(grid_min, 0, 1023).to(torch.int32)
+    grid_max = torch.clamp(grid_max, 0, 1023).to(torch.int32)
+
+    # Compute corners
+    corners = torch.zeros((8, 3), dtype=torch.int32, device=device)
+    idx = 0
+    for i in range(2):
+        for j in range(2):
+            for k in range(2):
+                corners[idx, 0] = grid_min[0] if i == 0 else grid_max[0]
+                corners[idx, 1] = grid_min[1] if j == 0 else grid_max[1]
+                corners[idx, 2] = grid_min[2] if k == 0 else grid_max[2]
+                idx += 1
+
+    morton_codes = grid_coords_to_morton(corners)
+    # Convert to int64 for min/max operations (uint32 not supported)
+    morton_codes_int64 = morton_codes.to(torch.int64)
+    morton_min = int(morton_codes_int64.min().item())
+    morton_max = int(morton_codes_int64.max().item())
+
+    return morton_min, morton_max
+
+
+# =============================================================================
+# Original Point Cloud Morton Encoding
+# =============================================================================
+
 class Morton3D(torch.nn.Module):
     def __init__(
         self,
     ):
         super(Morton3D, self).__init__()
-        
+
     def forward(
         self,
         pointcloud: torch.Tensor,
