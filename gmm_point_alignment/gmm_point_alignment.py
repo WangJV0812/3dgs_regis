@@ -18,17 +18,12 @@ from typing import Optional, Dict, Tuple, Any
 from time import time
 
 from misc.hier_IO import GaussianScenes
-from gmm_point_alignment.csr_grid_builder import (
+from gmm_point_alignment.mle_registration import (
     CSRGridBuilder,
     CSRGridBuilderConfig,
     CSRGridData,
-)
-from gmm_point_alignment.csr_grid_querier import (
     CSRGridQuerier,
     CSRGridQuerierConfig,
-    QueryResult as CSRGridQueryResult,
-)
-from gmm_point_alignment.sphere_mle_loss import (
     MLEAlignmentLoss,
     MLELossConfig,
     GMMRegistration,

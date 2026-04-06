@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 from time import time
 
-from gmm_point_alignment.csr_grid_builder import CSRGridData
-from gmm_point_alignment.morton_code import grid_coords_to_morton
+from .csr_grid_builder import CSRGridData
+from .morton_code import grid_coords_to_morton
 
 # =============================================================================
 # Configuration

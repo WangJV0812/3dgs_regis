@@ -1,7 +1,7 @@
 import taichi as ti
 import torch
 from misc.geometry import quaternion_to_rotation_ti
-from gmm_point_alignment.gs_scene_radius import approximate_chi_2_critical_value
+from .gs_scene_radius import approximate_chi_2_critical_value
 
 
 @ti.func

@@ -8,8 +8,8 @@ import torch.nn as nn
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple
 
-from gmm_point_alignment.csr_grid_builder import CSRGridData
-from gmm_point_alignment.csr_grid_querier import CSRGridQuerier, CSRGridQuerierConfig
+from .csr_grid_builder import CSRGridData
+from .csr_grid_querier import CSRGridQuerier, CSRGridQuerierConfig
 from gmm_point_alignment.transform_utils import transform_points, se3_exp, sim3_exp
 
 

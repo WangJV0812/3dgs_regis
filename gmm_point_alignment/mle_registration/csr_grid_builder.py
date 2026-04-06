@@ -17,11 +17,11 @@ from typing import Tuple, Optional, List
 from time import time
 
 from misc.hier_IO import GaussianScenes
-from gmm_point_alignment.gs_scene_aabb import (
+from .gs_scene_aabb import (
     robust_global_scene_aabb,
     gaussian_scene_aabb,
 )
-from gmm_point_alignment.morton_code import grid_coords_to_morton
+from .morton_code import grid_coords_to_morton
 
 # =============================================================================
 # Constants
@@ -616,7 +616,7 @@ class CSRGridBuilder(torch.nn.Module):
             grid_coords: [N, 3] grid coordinates
         """
         # Use existing morton_code module function
-        from gmm_point_alignment.morton_code import morton_to_grid_coords
+        from .morton_code import morton_to_grid_coords
         return morton_to_grid_coords(morton_codes)
 
     def _precompute_sphere_data(
