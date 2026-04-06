@@ -135,29 +135,20 @@ def grid_coord_from_point_ti(
 # =============================================================================
 
 @ti.kernel
-def enumerate_pairs_kernel(
-    min_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),      # [M, 3]
-    max_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),      # [M, 3]
-    global_min: ti.types.ndarray(dtype=ti.f32, ndim=1),       # [3]
+def count_voxels_kernel(
+    min_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    max_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    global_min: ti.types.ndarray(dtype=ti.f32, ndim=1),
     voxel_size: ti.f32,
     grid_size: ti.i32,
     oversized_threshold: ti.i32,
-    # Output buffers (pre-allocated)
-    out_morton: ti.types.ndarray(dtype=ti.i64, ndim=1),       # [max_pairs]
-    out_sphere_id: ti.types.ndarray(dtype=ti.i32, ndim=1),    # [max_pairs]
-    out_is_oversized: ti.types.ndarray(dtype=ti.i32, ndim=1), # [M]
-    # Counter
-    pair_counter: ti.types.ndarray(dtype=ti.i32, ndim=1),     # [1]
+    voxel_counts: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    out_is_oversized: ti.types.ndarray(dtype=ti.i32, ndim=1),
 ):
-    """Enumerate sphere-voxel pairs in parallel.
-
-    Each thread processes one sphere, enumerating all voxels it overlaps.
-    Oversized spheres are marked and skipped.
-    """
+    """Count voxels per sphere and mark oversized (Pass 1)."""
     sphere_count = min_corners.shape[0]
 
     for sphere_id in range(sphere_count):
-        # Get sphere AABB in world coordinates
         p_min = ti.math.vec3([
             min_corners[sphere_id, 0],
             min_corners[sphere_id, 1],
@@ -169,11 +160,9 @@ def enumerate_pairs_kernel(
             max_corners[sphere_id, 2]
         ])
 
-        # Convert to grid coordinates
         g_min = grid_coord_from_point_ti(p_min, ti.math.vec3([global_min[0], global_min[1], global_min[2]]), voxel_size)
         g_max = grid_coord_from_point_ti(p_max, ti.math.vec3([global_min[0], global_min[1], global_min[2]]), voxel_size)
 
-        # Clamp to grid bounds
         g_min.x = ti.max(0, ti.min(g_min.x, grid_size - 1))
         g_min.y = ti.max(0, ti.min(g_min.y, grid_size - 1))
         g_min.z = ti.max(0, ti.min(g_min.z, grid_size - 1))
@@ -181,29 +170,77 @@ def enumerate_pairs_kernel(
         g_max.y = ti.max(0, ti.min(g_max.y, grid_size - 1))
         g_max.z = ti.max(0, ti.min(g_max.z, grid_size - 1))
 
-        # Calculate voxel count
         extent = g_max - g_min + 1
         num_voxels = extent.x * extent.y * extent.z
 
         if num_voxels > oversized_threshold:
             out_is_oversized[sphere_id] = 1
+            voxel_counts[sphere_id] = 0
         else:
             out_is_oversized[sphere_id] = 0
+            voxel_counts[sphere_id] = num_voxels
 
-            # Enumerate all voxels in the AABB
-            for dx in range(extent.x):
-                for dy in range(extent.y):
-                    for dz in range(extent.z):
-                        gx = g_min.x + dx
-                        gy = g_min.y + dy
-                        gz = g_min.z + dz
 
-                        morton = encode_morton_ti(gx, gy, gz)
+@ti.kernel
+def enumerate_pairs_kernel(
+    min_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    max_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    global_min: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    voxel_size: ti.f32,
+    grid_size: ti.i32,
+    offsets: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    out_morton: ti.types.ndarray(dtype=ti.i64, ndim=1),
+    out_sphere_id: ti.types.ndarray(dtype=ti.i32, ndim=1),
+):
+    """Enumerate sphere-voxel pairs using pre-computed offsets (Pass 2).
 
-                        idx = ti.atomic_add(pair_counter[0], 1)
-                        if idx < out_morton.shape[0]:
-                            out_morton[idx] = ti.cast(morton, ti.i64)
-                            out_sphere_id[idx] = sphere_id
+    Each sphere writes to its designated slot [offset[i], offset[i+1]).
+    No atomic operations needed.
+    """
+    sphere_count = min_corners.shape[0]
+
+    for sphere_id in range(sphere_count):
+        start_idx = offsets[sphere_id]
+        end_idx = offsets[sphere_id + 1]
+
+        if end_idx <= start_idx:
+            continue
+
+        p_min = ti.math.vec3([
+            min_corners[sphere_id, 0],
+            min_corners[sphere_id, 1],
+            min_corners[sphere_id, 2]
+        ])
+        p_max = ti.math.vec3([
+            max_corners[sphere_id, 0],
+            max_corners[sphere_id, 1],
+            max_corners[sphere_id, 2]
+        ])
+
+        g_min = grid_coord_from_point_ti(p_min, ti.math.vec3([global_min[0], global_min[1], global_min[2]]), voxel_size)
+        g_max = grid_coord_from_point_ti(p_max, ti.math.vec3([global_min[0], global_min[1], global_min[2]]), voxel_size)
+
+        g_min.x = ti.max(0, ti.min(g_min.x, grid_size - 1))
+        g_min.y = ti.max(0, ti.min(g_min.y, grid_size - 1))
+        g_min.z = ti.max(0, ti.min(g_min.z, grid_size - 1))
+        g_max.x = ti.max(0, ti.min(g_max.x, grid_size - 1))
+        g_max.y = ti.max(0, ti.min(g_max.y, grid_size - 1))
+        g_max.z = ti.max(0, ti.min(g_max.z, grid_size - 1))
+
+        extent = g_max - g_min + 1
+
+        idx = start_idx
+        for dx in range(extent.x):
+            for dy in range(extent.y):
+                for dz in range(extent.z):
+                    gx = g_min.x + dx
+                    gy = g_min.y + dy
+                    gz = g_min.z + dz
+
+                    morton = encode_morton_ti(gx, gy, gz)
+                    out_morton[idx] = ti.cast(morton, ti.i64)
+                    out_sphere_id[idx] = sphere_id
+                    idx += 1
 
 
 # =============================================================================
@@ -342,7 +379,10 @@ class CSRGridBuilder(torch.nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Enumerate all sphere-voxel pairs where sphere overlaps voxel.
 
-        Uses PyTorch vectorized implementation with Taichi kernel acceleration.
+        Two-pass algorithm:
+        1. Count voxels per sphere
+        2. Prefix sum to compute offsets
+        3. Enumerate pairs without atomic conflicts
 
         Args:
             min_corners: [M, 3] per-sphere AABB min
@@ -358,27 +398,19 @@ class CSRGridBuilder(torch.nn.Module):
         device = min_corners.device
         M = min_corners.shape[0]
 
-        # Estimate maximum pairs (conservative: average 100 voxels per sphere)
-        max_pairs_estimate = M * 100
-
-        # Pre-allocate buffers
-        out_morton = torch.zeros((max_pairs_estimate,), dtype=torch.int64, device=device)
-        out_sphere_id = torch.zeros((max_pairs_estimate,), dtype=torch.int32, device=device)
+        # Pass 1: Count voxels per sphere
+        voxel_counts = torch.zeros((M,), dtype=torch.int32, device=device)
         out_is_oversized = torch.zeros((M,), dtype=torch.int32, device=device)
-        pair_counter = torch.zeros((1,), dtype=torch.int32, device=device)
 
-        # Run enumeration kernel
-        enumerate_pairs_kernel(
+        count_voxels_kernel(
             min_corners=min_corners,
             max_corners=max_corners,
             global_min=global_min,
             voxel_size=voxel_size,
             grid_size=self.config.max_grid_size,
             oversized_threshold=self.config.oversized_threshold_voxels,
-            out_morton=out_morton,
-            out_sphere_id=out_sphere_id,
+            voxel_counts=voxel_counts,
             out_is_oversized=out_is_oversized,
-            pair_counter=pair_counter,
         )
 
         ti.sync()
@@ -386,13 +418,30 @@ class CSRGridBuilder(torch.nn.Module):
         # Get oversized sphere IDs
         oversized_ids = torch.nonzero(out_is_oversized, as_tuple=False).squeeze(-1).to(torch.int32)
 
-        # Get actual pair count and truncate
-        actual_pairs = min(pair_counter[0].item(), max_pairs_estimate)
-        if actual_pairs >= max_pairs_estimate:
-            print(f"[CSRGrid] Warning: Pair buffer overflow, truncated to {max_pairs_estimate}")
+        # Compute prefix sum for exact memory allocation
+        # offsets[i] = sum(voxel_counts[0:i]), offsets[M] = total_pairs
+        offsets = torch.cat([
+            torch.zeros((1,), dtype=torch.int32, device=device),
+            torch.cumsum(voxel_counts, dim=0, dtype=torch.int32)
+        ])
+        total_pairs = offsets[-1].item()
 
-        out_morton = out_morton[:actual_pairs]
-        out_sphere_id = out_sphere_id[:actual_pairs]
+        # Pass 2: Enumerate pairs using pre-computed offsets (no atomic conflicts)
+        out_morton = torch.zeros((total_pairs,), dtype=torch.int64, device=device)
+        out_sphere_id = torch.zeros((total_pairs,), dtype=torch.int32, device=device)
+
+        enumerate_pairs_kernel(
+            min_corners=min_corners,
+            max_corners=max_corners,
+            global_min=global_min,
+            voxel_size=voxel_size,
+            grid_size=self.config.max_grid_size,
+            offsets=offsets,
+            out_morton=out_morton,
+            out_sphere_id=out_sphere_id,
+        )
+
+        ti.sync()
 
         # Sort by morton code
         sorted_indices = torch.argsort(out_morton)

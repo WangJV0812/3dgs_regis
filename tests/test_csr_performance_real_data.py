@@ -250,7 +250,7 @@ class TestCSRGridQuerierPerformance:
         sample_size = min(50000, real_pointcloud.shape[0])
         sample_points = real_pointcloud[:sample_size]
 
-        batch_sizes = [1000, 5000, 10000, 20000, 50000]
+        batch_sizes = [1000, 5000, 10000, 20000, 50000, 100000, 200000]
         results = []
 
         for batch_size in batch_sizes:
@@ -258,7 +258,7 @@ class TestCSRGridQuerierPerformance:
             querier = CSRGridQuerier(grid_data, querier_config)
 
             gc.collect()
-
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
             start = time()
             result = querier.query(sample_points)
             elapsed = time() - start
