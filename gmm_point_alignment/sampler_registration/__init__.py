@@ -10,7 +10,11 @@ from .registration_sampler import (
     register_with_sampler,
     SamplerRegistrationMethod,
 )
-from .gaussian_sampler import GaussianSampler
+from .gaussian_sampler import (
+    GaussianSampler,
+    SamplingConfig,
+    SampledPointCloud,
+)
 
 __all__ = [
     "RegistrationSamplerConfig",
@@ -18,4 +22,6 @@ __all__ = [
     "register_with_sampler",
     "SamplerRegistrationMethod",
     "GaussianSampler",
+    "SamplingConfig",
+    "SampledPointCloud",
 ]
