@@ -37,13 +37,24 @@ L2_GRID_SIZE = MAX_GRID_SIZE // L1_GRID_SIZE  # 32
 # Configuration
 # =============================================================================
 
+class VoxelSizeStrategy:
+    """Strategy for computing adaptive voxel size."""
+    MEDIAN_RADIUS = "median_radius"           # Original: median of max axes
+    SHORT_AXIS_MEDIAN = "short_axis_median"   # Median of shortest axes
+    SHORT_AXIS_MODE = "short_axis_mode"       # Mode of shortest axes (most common)
+    VOLUME_BASED = "volume_based"             # Based on median volume
+    PERCENTILE_DENSE = "percentile_dense"     # P10 of small scales (dense regions)
+
+
 @dataclass
 class CSRGridBuilderConfig:
     """Configuration for CSR Grid Builder.
 
     Args:
         confidence_level: Confidence level for AABB computation (default: 0.95)
-        voxel_size_factor: Median radius multiplier for voxel size (default: 3.0)
+        voxel_size_strategy: Strategy for computing voxel size
+        voxel_size_factor: Multiplier for computed voxel size (default: 2.0)
+        target_spheres_per_voxel: Target number of spheres per voxel (default: 10)
         max_grid_size: Maximum grid resolution per dimension (default: 1024)
         oversized_threshold_voxels: Threshold for oversized spheres (default: 64)
         l1_grid_size: Coarse grid dimension (default: 32)
@@ -52,7 +63,9 @@ class CSRGridBuilderConfig:
         global_aabb_clip_quantile: Quantile for outlier clipping (default: 0.01)
     """
     confidence_level: float = 0.95
-    voxel_size_factor: float = 3.0
+    voxel_size_strategy: str = VoxelSizeStrategy.SHORT_AXIS_MEDIAN
+    voxel_size_factor: float = 2.0
+    target_spheres_per_voxel: float = 10.0
     max_grid_size: int = 1024
     oversized_threshold_voxels: int = 64
     l1_grid_size: int = 32
@@ -329,6 +342,8 @@ class CSRGridBuilder(torch.nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, float, torch.Tensor]:
         """Compute voxel size and per-sphere AABB.
 
+        Uses adaptive voxel size computation based on configured strategy.
+
         Args:
             scene: Gaussian scene
 
@@ -364,11 +379,86 @@ class CSRGridBuilder(torch.nn.Module):
             padding_factor=self.config.global_aabb_padding_factor,
         )
 
-        # Compute voxel size based on median radius
-        median_radius = torch.median(radius[:, 0]).item()
-        voxel_size = median_radius * self.config.voxel_size_factor
+        # Compute adaptive voxel size based on strategy
+        voxel_size = self._compute_adaptive_voxel_size(scene, radius)
 
         return min_corners, max_corners, voxel_size, global_min
+
+    def _compute_adaptive_voxel_size(
+        self,
+        scene: GaussianScenes,
+        radius: torch.Tensor,
+    ) -> float:
+        """Compute adaptive voxel size based on scene characteristics.
+
+        Args:
+            scene: Gaussian scene
+            radius: [M, 3] per-sphere radii
+
+        Returns:
+            voxel_size: float
+        """
+        strategy = self.config.voxel_size_strategy
+        factor = self.config.voxel_size_factor
+
+        # Get real scales (exp of log scales stored in hierarchy)
+        scales = scene.scales.float()
+        real_scales = torch.exp(scales)  # [M, 3]
+
+        if strategy == VoxelSizeStrategy.MEDIAN_RADIUS:
+            # Original: use median of max radii
+            base_size = torch.median(radius[:, 0]).item()
+
+        elif strategy == VoxelSizeStrategy.SHORT_AXIS_MEDIAN:
+            # Use median of shortest axes
+            short_axes = real_scales.min(dim=1)[0]  # [M]
+            # Filter out extremely small values (numerical noise)
+            valid_short = short_axes[short_axes > 1e-6]
+            if len(valid_short) > 0:
+                base_size = torch.median(valid_short).item()
+            else:
+                base_size = torch.median(short_axes).item()
+
+        elif strategy == VoxelSizeStrategy.SHORT_AXIS_MODE:
+            # Use mode (most common) of shortest axes
+            short_axes = real_scales.min(dim=1)[0]  # [M]
+            # Filter outliers and find histogram peak
+            valid_short = short_axes[short_axes > 1e-6]
+            if len(valid_short) > 0:
+                # Use histogram to find mode
+                hist, bin_edges = torch.histogram(valid_short.cpu(), bins=100)
+                mode_idx = hist.argmax().item()
+                base_size = (bin_edges[mode_idx] + bin_edges[mode_idx + 1]).item() / 2
+            else:
+                base_size = torch.median(short_axes).item()
+
+        elif strategy == VoxelSizeStrategy.VOLUME_BASED:
+            # Based on median volume (cube root)
+            volumes = real_scales.prod(dim=1)  # [M]
+            median_volume = torch.median(volumes).item()
+            base_size = median_volume ** (1/3)
+
+        elif strategy == VoxelSizeStrategy.PERCENTILE_DENSE:
+            # Use lower percentile to focus on dense regions
+            short_axes = real_scales.min(dim=1)[0]
+            # P10 - only consider small gaussians (dense regions)
+            base_size = torch.quantile(short_axes, 0.1).item()
+
+        else:
+            # Default to median radius
+            base_size = torch.median(radius[:, 0]).item()
+
+        voxel_size = base_size * factor
+
+        # Sanity check: ensure voxel size is reasonable
+        if voxel_size < 1e-6:
+            print(f"[CSRGrid] Warning: computed voxel size {voxel_size:.2e} too small, using fallback")
+            voxel_size = torch.median(radius[:, 0]).item() * factor
+
+        print(f"[CSRGrid] Voxel size strategy: {strategy}")
+        print(f"[CSRGrid] Base size: {base_size:.6f}, Factor: {factor}, Final: {voxel_size:.6f}")
+
+        return voxel_size
 
     def _enumerate_sphere_voxel_pairs(
         self,

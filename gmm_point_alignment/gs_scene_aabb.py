@@ -14,31 +14,38 @@ def gaussian_sphere_aabb(
 
     min_corner = center
     max_corner = center
-    
+
     rotation = quaternion_to_rotation_ti(quaternion.normalized())
-    
+
     sqrt_c = ti.sqrt(critical_value)
-    
+
     extents = ti.math.vec3([0.0, 0.0, 0.0])
-    
+
+    # Convert log scales to real scales
+    real_scales = ti.math.vec3([
+        ti.exp(scales[0]),
+        ti.exp(scales[1]),
+        ti.exp(scales[2])
+    ])
+
     for axis in ti.static(range(3)):
         L = 0.0
         for i in ti.static(range(3)):
             R_ai = rotation[axis, i]
-            L += R_ai * R_ai * scales[i] * scales[i]
-        
+            L += R_ai * R_ai * real_scales[i] * real_scales[i]
+
         half_extent = sqrt_c * ti.sqrt(L)
         extents[axis] = half_extent * 2.0
 
         min_corner[axis] -= half_extent
         max_corner[axis] += half_extent
-    
+
     # Sort extents in descending order (max, mid, min)
     sorted_extents = ti.math.vec3([0.0, 0.0, 0.0])
     sorted_extents[0] = ti.max(ti.max(extents[0], extents[1]), extents[2])
     sorted_extents[2] = ti.min(ti.min(extents[0], extents[1]), extents[2])
     sorted_extents[1] = extents[0] + extents[1] + extents[2] - sorted_extents[0] - sorted_extents[2]
-    
+
     return min_corner, max_corner, sorted_extents
 
 @ti.kernel

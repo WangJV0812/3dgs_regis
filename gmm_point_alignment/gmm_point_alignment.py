@@ -1,354 +1,577 @@
-import taichi as ti
+"""GMM Point Alignment V2 - Main orchestrator for point cloud registration.
+
+Integrates CSR Grid construction, Top-K querying, and MLE-based registration
+into a unified interface.
+
+Example:
+    >>> from gmm_point_alignment.gmm_point_alignment import GMMPointAlignment
+    >>> aligner = GMMPointAlignment()
+    >>> aligner.build_grid(scene)
+    >>> result = aligner.register(pointcloud)
+    >>> print(f"Optimized transform: {result['transform']}")
+"""
+
 import torch
-from dataclasses import dataclass
+import taichi as ti
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Tuple, Any
+from time import time
 
-from morton_code import (
-    expand_bits_10,
-    compact_bits_10
-)
-from gmm_point_alignment.gs_scene_aabb import (
-    robust_global_scene_aabb,
-    gaussian_scene_aabb,
-)
 from misc.hier_IO import GaussianScenes
-from misc.geometry import (
-    gaussian_density_ti,
-    compute_gaussian_covariance,
-    compute_gaussian_normalized_factor_cov_inv_ti
+from gmm_point_alignment.csr_grid_builder import (
+    CSRGridBuilder,
+    CSRGridBuilderConfig,
+    CSRGridData,
 )
+from gmm_point_alignment.csr_grid_querier import (
+    CSRGridQuerier,
+    CSRGridQuerierConfig,
+    QueryResult as CSRGridQueryResult,
+)
+from gmm_point_alignment.sphere_mle_loss import (
+    MLEAlignmentLoss,
+    MLELossConfig,
+    GMMRegistration,
+    RegistrationConfig,
+)
+from gmm_point_alignment.transform_utils import se3_exp, se3_log
 
+
+# =============================================================================
+# Configuration
+# =============================================================================
 
 @dataclass
 class GMMPointAlignmentConfig:
-    confidence_level: float = 0.95
-    global_aabb_clip_quantile: float = 0.01
-    global_aabb_padding_factor: float = 0.1
-    voxel_size_factor: float = 0.1
-    gaussian_confidence_threshold: float = 0.01
+    """Configuration for GMM Point Alignment.
 
-
-def calculate_voxel_size_and_sphere_aabb(
-    scene: GaussianScenes,
-    confidence_level: float = 0.95,
-    global_aabb_clip_quantile: float = 0.01,
-    global_aabb_padding_factor: float = 0.1,
-    voxel_size_factor: float = 0.1,
-) -> float:
-    
-    min_corners = torch.zeros_like(scene.position)
-    max_corners = torch.zeros_like(scene.position)
-    radius = torch.zeros_like(scene.scales)
-
-    gaussian_scene_aabb(
-        centers=scene.position.contiguous(),
-        scales=scene.scales.contiguous(),
-        quaternions=scene.rotation.contiguous(),
-        min_corners=min_corners,
-        max_corners=max_corners,
-        radius=radius,
-        confidence_level=confidence_level,
-    )
-    
-    global_min_corner, global_max_corner = robust_global_scene_aabb(
-        min_corners=min_corners,
-        max_corners=max_corners,
-        clip_quantile=global_aabb_clip_quantile,
-        padding_factor=global_aabb_padding_factor,
-    )
-       
-    global_scene_size = global_max_corner - global_min_corner
-    
-    print(f"global scene size: {global_scene_size}")
-    
-    median_radius = torch.median(radius[:, 0]).item()
-    voxel_size = median_radius * voxel_size_factor 
-
-    print(f"voxel size: {voxel_size}")
-        
-    return {
-        'spheres': {
-            'aabb_min_corners': min_corners,
-            'aabb_max_corners': max_corners,
-            'radius': radius,
-        },
-        'global': {
-            'aabb_min_corner': global_min_corner,
-            'aabb_max_corner': global_max_corner,
-            'voxel_size': voxel_size,
-        },
-    }
-    
-    
-def sphere_grid_counts(
-    aabb_min: torch.Tensor,   # (N,3)
-    aabb_max: torch.Tensor,   # (N,3)
-    voxel_size: float,
-):
-    """sphere_grid_counts compute the number of voxels each sphere occupies in the grid, as well as the prefix sum for indexing.
+    Combines configurations for all sub-components.
 
     Args:
-        aabb_min (torch.Tensor): min corner of the AABB for each sphere, shape (N, 3)
-        aabb_max (torch.Tensor): max corner of the AABB for each sphere, shape (N, 3)
-        voxel_size (float): the size of each voxel in the grid
-
-    Returns:
-        dict: {
-            "grid_min": grid_min,  # (N, 3) the min grid coordinate for each sphere
-            "grid_max": grid_max,  # (N, 3) the max grid coordinate for each sphere
-            "counts": counts,      # (N,) the number of voxels each sphere occupies
-            "prefix": prefix_exclusive,  # (N,) the exclusive prefix sum for indexing
-            "total_pairs": total, # int, the total number of sphere-voxel pairs
-        } 
+        grid_config: CSR grid builder configuration
+        query_config: Grid querier configuration
+        loss_config: MLE loss configuration
+        reg_config: Registration optimization configuration
     """
-    grid_min = torch.floor(aabb_min / voxel_size).int()
-    grid_max = torch.floor(aabb_max / voxel_size).int()
-
-    extent = grid_max - grid_min + 1
-    counts = extent.prod(dim=1)                     # (N,)
-
-    prefix = torch.cumsum(counts, dim=0)
-    prefix_exclusive = prefix - counts              # (N,)
-
-    total = counts.sum()
-
-    return {
-        "grid_min": grid_min,
-        "grid_max": grid_max,
-        "counts": counts,
-        "prefix": prefix_exclusive,
-        "total_pairs": total,
-    }
+    grid_config: CSRGridBuilderConfig = field(default_factory=CSRGridBuilderConfig)
+    query_config: CSRGridQuerierConfig = field(default_factory=CSRGridQuerierConfig)
+    loss_config: MLELossConfig = field(default_factory=MLELossConfig)
+    reg_config: RegistrationConfig = field(default_factory=RegistrationConfig)
 
 
-@ti.func
-def morton3D_encoder(
-    point: ti.math.vec3,
-    bounding_extent: ti.math.vec3,
-    bounding_min: ti.math.vec3,
-)-> ti.u32:
-    normalized_point = (point - bounding_min) / (bounding_extent + 1e-7)
-    x, y, z = normalized_point.x, normalized_point.y, normalized_point.z
+# =============================================================================
+# Result Types
+# =============================================================================
 
-    x = ti.cast(x * 1024, ti.u32)
-    y = ti.cast(y * 1024, ti.u32)
-    z = ti.cast(z * 1024, ti.u32)
-
-    return expand_bits_10(x) | (expand_bits_10(y) << 1) | (expand_bits_10(z) << 2)
+@dataclass
+class QueryResult:
+    """Result from point-to-sphere query."""
+    topk_sphere_ids: torch.Tensor  # [N, K]
+    topk_densities: torch.Tensor   # [N, K]
+    query_time_ms: float
 
 
-@ti.func
-def morton3D_decoder(
-    code: ti.u32,
-    bounding_extent: ti.math.vec3,
-    bounding_min: ti.math.vec3,
-) -> ti.math.vec3:
-    x = compact_bits_10(code >> 2)
-    y = compact_bits_10(code >> 1)
-    z = compact_bits_10(code)
-
-    normalized_point = ti.math.vec3(x, y, z) / 1024.0
-    point = normalized_point * bounding_extent + bounding_min
-    return point
+@dataclass
+class RegistrationResult:
+    """Result from registration optimization."""
+    transform: torch.Tensor           # [4, 4]
+    loss: float
+    inlier_ratio: float
+    num_iters: int
+    converged: bool
+    optimization_time_ms: float
+    scale: float = 1.0                # Scale factor (if optimized)
 
 
-@ti.kernel
-def gmm_grid_creation(
-    sphere_grid_min: ti.types.ndarray(ti.i32, 2),
-    sphere_grid_max: ti.types.ndarray(ti.i32, 2),
-    sphere_presum: ti.types.ndarray(ti.i32, 1),
-    global_min: ti.types.ndarray(ti.f32, 1),  # (3,)
-    global_extent: ti.types.ndarray(ti.f32, 1),  # (3)
-    
-    out_pairs: ti.types.ndarray(ti.i32, 2)  # (total_pairs,2) -> (hash_idx, sphere_id)
-):
-
-    sphere_counts = sphere_grid_min.shape[0]
-
-    for sphere_idx in range(sphere_counts):
-        minx = sphere_grid_min[sphere_idx, 0]
-        miny = sphere_grid_min[sphere_idx, 1]
-        minz = sphere_grid_min[sphere_idx, 2]
-
-        maxx = sphere_grid_max[sphere_idx, 0]
-        maxy = sphere_grid_max[sphere_idx, 1]
-        maxz = sphere_grid_max[sphere_idx, 2]
-
-        dy = maxy - miny + 1
-        dz = maxz - minz + 1
-
-        base = sphere_presum[sphere_idx]
-        bounding_extent = ti.math.vec3(global_extent[0], global_extent[1], global_extent[2])
-        bounding_min = ti.math.vec3(global_min[0], global_min[1], global_min[2])
-
-        for x in range(minx, maxx + 1):
-            for y in range(miny, maxy + 1):
-                for z in range(minz, maxz + 1):
-
-                    local_idx = (x - minx) * dy * dz + (y - miny) * dz + (z - minz)
-                    global_idx = base + local_idx
-
-                    hash_index = morton3D_encoder(
-                        ti.math.vec3(x, y, z),
-                        bounding_extent,
-                        bounding_min, 
-                    )
-
-                    out_pairs[global_idx, 0] = hash_index
-                    out_pairs[global_idx, 1] = sphere_idx
+@dataclass
+class AlignmentResult:
+    """Complete alignment result combining query and registration."""
+    query: QueryResult
+    registration: Optional[RegistrationResult] = None
+    total_time_ms: float = 0.0
 
 
-@ti.func
-def get_grid_index(pos: ti.math.vec3, global_min: ti.math.vec3, grid_size: ti.math.vec3) -> ti.math.uvec3:
-
-    normalized = (pos - global_min) / grid_size
-
-    idx = ti.cast(ti.floor(normalized * 1024), ti.u32)
-    return ti.math.clamp(idx, 0, 1023)
-
-
-@ti.func
-def binary_search_range(
-    code: ti.u32, 
-    pairs: ti.types.ndarray(ti.i32, 2),
-    total_pairs: ti.i32
-) -> ti.math.vec2:
-    
-    l, r = 0, total_pairs
-    while l < r:
-        mid = l + (r - l) // 2
-        if ti.cast(pairs[mid, 0], ti.u32) < code:
-            l = mid + 1
-        else:
-            r = mid
-    start = l
-
-    l, r = start, total_pairs
-    while l < r:
-        mid = l + (r - l) // 2
-        if ti.cast(pairs[mid, 0], ti.u32) <= code:
-            l = mid + 1
-        else:
-            r = mid
-    end = l
-    
-    return ti.math.vec2(start, end)
-
-
-@ti.kernel
-def query_top_k(
-    K: ti.i32,
-    gaussian_confidence_threshold: ti.f32,
-    pointcloud: ti.types.ndarray(ti.f32, 2),  # (N, 3)
-    global_extent: ti.types.ndarray(ti.f32, 1),  # (3,)
-    global_min: ti.types.ndarray(ti.f32, 1),  # (3,)
-    sphere_grid_pairs: ti.types.ndarray(ti.i32, 2),  # (total_pairs, 2) -> (hash_idx, sphere_id)
-    position: ti.types.ndarray(ti.f32, 2),  # (M, 3)
-    rotation: ti.types.ndarray(ti.f32, 2),  # (M, 4)
-    scles: ti.types.ndarray(ti.f32, 2),  # (M, 3)
-    # middle variables 
-    covariance_inv_buffer: ti.types.ndarray(ti.f32, 3),  # (M, 3, 3)
-    normalized_distance_buffer: ti.types.ndarray(ti.f32, 1),  # (N, M)
-    # output
-    topk_sphere_ids: ti.types.ndarray(ti.i32, 2),  # (N, K)
-):
-    sphere_counts = position.shape[0]
-    for sphere_idx in range(sphere_counts):
-        local_rotation = ti.math.vec4([
-            rotation[sphere_idx, 0],
-            rotation[sphere_idx, 1],
-            rotation[sphere_idx, 2],
-            rotation[sphere_idx, 3],
-        ])
-        
-        local_scale = ti.math.vec3([
-            scles[sphere_idx, 0],
-            scles[sphere_idx, 1],
-            scles[sphere_idx, 2],
-        ])
-        
-        local_cov_inv = compute_gaussian_covariance(local_scale, local_rotation).inverse()
-        
-        for i, j in ti.static(ti.ndrange(3, 3)):
-            covariance_inv_buffer[sphere_idx, i, j] = local_cov_inv[i, j]
-        
-        normalized_distance_buffer[sphere_idx] = compute_gaussian_normalized_factor_cov_inv_ti(
-            local_cov_inv
-        )
-        
-    
-    
-    point_counts = pointcloud.shape[0]
-    global_extent_ti = ti.math.vec3(global_extent[0], global_extent[1], global_extent[2])
-    global_min_ti = ti.math.vec3(global_min[0], global_min[1], global_min[2])
-    total_pairs = sphere_grid_pairs.shape[0]
-    
-    for point_idx in range(point_counts):
-        local_point = ti.math.vec3([
-            pointcloud[point_idx, 0], 
-            pointcloud[point_idx, 1], 
-            pointcloud[point_idx, 2]
-        ])
-        
-        point_hash = morton3D_encoder(
-            local_point,
-            global_extent_ti,
-            global_min_ti,
-        )
-        
-        range = binary_search_range(
-            point_hash,
-            sphere_grid_pairs,
-            total_pairs,
-        )
-
-        range_start, range_end = range.x, range.y
-        
-        for pairs_idx in range(range_start, range_end):
-            sphere_id = sphere_grid_pairs[pairs_idx, 1]
-            
-            local_cov_inv = ti.Matrix.zeros(ti.f32, 3, 3)
-            
-            for i, j in ti.static(ti.ndrange(3, 3)):
-                local_cov_inv[i, j] = covariance_inv_buffer[sphere_id, i, j]
-                
-            local_pos = ti.math.vec3([
-                position[sphere_id, 0],
-                position[sphere_id, 1],
-                position[sphere_id, 2],
-            ])
-            
-            diff = local_point - local_pos
-            normalized_distance = diff.dot(local_cov_inv @ d iff) + normalized_distance_buffer[sphere_id]
-            
-            if normalized_distance < gaussian_confidence_threshold:
-                topk_sphere_ids[point_idx, 0] = sphere_id
-                break
-            
-            
-
-
+# =============================================================================
+# Main Orchestrator
+# =============================================================================
 
 class GMMPointAlignment(torch.nn.Module):
+    """Main orchestrator for GMM-based point cloud registration.
+
+    Integrates CSR grid building, Top-K querying, and MLE registration
+    into a unified workflow.
+
+    Args:
+        config: Alignment configuration
+
+    Example:
+        >>> aligner = GMMPointAlignment()
+        >>> aligner.build_grid(scene)
+        >>> result = aligner.register(pointcloud)
+        >>> print(f"Optimized transform: {result.transform}")
+    """
+
     def __init__(
         self,
         config: GMMPointAlignmentConfig = GMMPointAlignmentConfig(),
     ):
-        super(GMMPointAlignment, self).__init__()
+        super().__init__()
         self.config = config
-        
-    
+
+        # Sub-components (initialized lazily)
+        self._grid_builder: Optional[CSRGridBuilder] = None
+        self._grid_data: Optional[CSRGridData] = None
+        self._querier: Optional[CSRGridQuerier] = None
+        self._loss_fn: Optional[MLEAlignmentLoss] = None
+        self._registration: Optional[GMMRegistration] = None
+
+        # Cached scene info
+        self._scene_built: bool = False
+        self._num_spheres: int = 0
+
+    # ========================================================================
+    # Grid Building (Phase 1)
+    # ========================================================================
+
+    def build_grid(
+        self,
+        scene: GaussianScenes,
+        force_rebuild: bool = False,
+    ) -> 'GMMPointAlignment':
+        """Build CSR grid for the scene (one-time cost).
+
+        This method must be called before query() or register().
+        The grid is cached and can be reused for multiple point clouds.
+
+        Args:
+            scene: Gaussian scene with positions, scales, rotations, opacities
+            force_rebuild: If True, rebuild even if already built
+
+        Returns:
+            self for method chaining
+
+        Example:
+            >>> aligner = GMMPointAlignment()
+            >>> aligner.build_grid(scene)
+            >>> # Now ready for queries
+        """
+        if self._scene_built and not force_rebuild:
+            print("[GMMPointAlignment] Grid already built, skipping. "
+                  "Use force_rebuild=True to rebuild.")
+            return self
+
+        print("[GMMPointAlignment] Building CSR grid...")
+        start_time = time()
+
+        self._grid_builder = CSRGridBuilder(self.config.grid_config)
+        self._grid_data = self._grid_builder.build(scene)
+
+        build_time = (time() - start_time) * 1000
+
+        self._num_spheres = scene.position.shape[0]
+        self._scene_built = True
+
+        print(f"[GMMPointAlignment] Grid built in {build_time:.1f}ms")
+        print(f"  - Spheres: {self._num_spheres}")
+        print(f"  - Voxel size: {self._grid_data.voxel_size:.4f}")
+        print(f"  - Grid dims: {self._grid_data.grid_dims}")
+
+        # Initialize dependent components
+        self._init_querier()
+        self._init_registration()
+
+        return self
+
+    def _init_querier(self) -> None:
+        """Initialize grid querier."""
+        if self._grid_data is None:
+            raise RuntimeError("Grid not built. Call build_grid() first.")
+
+        self._querier = CSRGridQuerier(
+            self._grid_data,
+            self.config.query_config,
+        )
+        self._loss_fn = MLEAlignmentLoss(
+            self._grid_data,
+            self.config.loss_config,
+        )
+
+    def _init_registration(self) -> None:
+        """Initialize registration optimizer."""
+        if self._grid_data is None:
+            raise RuntimeError("Grid not built. Call build_grid() first.")
+
+        self._registration = GMMRegistration(
+            self._grid_data,
+            loss_config=self.config.loss_config,
+            reg_config=self.config.reg_config,
+        )
+
+    # ========================================================================
+    # Query (Phase 2)
+    # ========================================================================
+
+    def query(
+        self,
+        points: torch.Tensor,
+        transform: Optional[torch.Tensor] = None,
+    ) -> QueryResult:
+        """Query Top-K spheres for each point.
+
+        Args:
+            points: [N, 3] point cloud
+            transform: [4, 4] optional transformation to apply to points
+
+        Returns:
+            QueryResult with topk_sphere_ids and topk_densities
+
+        Raises:
+            RuntimeError: If grid not built
+        """
+        if not self._scene_built:
+            raise RuntimeError(
+                "Grid not built. Call build_grid(scene) before query()."
+            )
+
+        start_time = time()
+
+        # Transform points if needed
+        if transform is not None:
+            R = transform[:3, :3]
+            t = transform[:3, 3]
+            points = (R @ points.T).T + t
+
+        # Query grid
+        query_result = self._querier.query(points)
+
+        query_time = (time() - start_time) * 1000
+
+        return QueryResult(
+            topk_sphere_ids=query_result.topk_sphere_ids,
+            topk_densities=query_result.topk_densities,
+            query_time_ms=query_time,
+        )
+
+    # ========================================================================
+    # Registration (Phase 3)
+    # ========================================================================
+
+    def register(
+        self,
+        points: torch.Tensor,
+        initial_transform: Optional[torch.Tensor] = None,
+        config: Optional[RegistrationConfig] = None,
+    ) -> RegistrationResult:
+        """Register point cloud to scene using MLE optimization.
+
+        Args:
+            points: [N, 3] point cloud to register
+            initial_transform: [4, 4] optional initial guess
+            config: Optional override for registration config
+
+        Returns:
+            RegistrationResult with optimized transform and statistics
+
+        Raises:
+            RuntimeError: If grid not built
+        """
+        if not self._scene_built:
+            raise RuntimeError(
+                "Grid not built. Call build_grid(scene) before register()."
+            )
+
+        # Use custom config if provided
+        if config is not None:
+            registration = GMMRegistration(
+                self._grid_data,
+                loss_config=self.config.loss_config,
+                reg_config=config,
+            )
+        else:
+            registration = self._registration
+
+        print("[GMMPointAlignment] Starting registration...")
+        start_time = time()
+
+        result = registration.register(points, initial_transform)
+
+        opt_time = (time() - start_time) * 1000
+
+        print(f"[GMMPointAlignment] Registration completed in {opt_time:.1f}ms")
+        print(f"  - Loss: {result['loss'].item():.4f}")
+        print(f"  - Iters: {result['num_iters']}")
+        print(f"  - Converged: {result['converged'].item()}")
+        if 'scale' in result:
+            print(f"  - Scale: {result['scale'].item():.4f}")
+
+        return RegistrationResult(
+            transform=result['transform'],
+            loss=result['loss'].item(),
+            inlier_ratio=result['inlier_ratio'].item(),
+            num_iters=result['num_iters'],
+            converged=result['converged'].item(),
+            optimization_time_ms=opt_time,
+            scale=result.get('scale', torch.tensor(1.0)).item(),
+        )
+
+    def register_with_icp_init(
+        self,
+        points: torch.Tensor,
+        icp_transform: torch.Tensor,
+        config: Optional[RegistrationConfig] = None,
+    ) -> RegistrationResult:
+        """Register with ICP initialization for coarse alignment.
+
+        Args:
+            points: [N, 3] point cloud
+            icp_transform: [4, 4] ICP coarse alignment
+            config: Optional override for registration config
+
+        Returns:
+            RegistrationResult with refined transform
+        """
+        if config is None:
+            config = RegistrationConfig(
+                num_iters=50,
+                lr=0.01,
+                multi_init=False,
+                verbose=True,
+            )
+
+        return self.register(points, icp_transform, config)
+
+    # ========================================================================
+    # Combined Workflow
+    # ========================================================================
+
+    def align(
+        self,
+        points: torch.Tensor,
+        initial_transform: Optional[torch.Tensor] = None,
+    ) -> AlignmentResult:
+        """Complete alignment workflow: query + registration.
+
+        This is a convenience method that runs the full pipeline:
+        1. Query Top-K associations for initial transform
+        2. Optimize transform using MLE registration
+
+        Args:
+            points: [N, 3] point cloud
+            initial_transform: [4, 4] optional initial guess
+
+        Returns:
+            AlignmentResult with query and registration results
+        """
+        total_start = time()
+
+        # Query
+        query_result = self.query(points, initial_transform)
+
+        # Register
+        reg_result = self.register(points, initial_transform)
+
+        total_time = (time() - total_start) * 1000
+
+        return AlignmentResult(
+            query=query_result,
+            registration=reg_result,
+            total_time_ms=total_time,
+        )
+
+    # ========================================================================
+    # PyTorch nn.Module Interface
+    # ========================================================================
+
     def forward(
         self,
         scene: GaussianScenes,
-    ):
-        scene_aabb_dict = calculate_voxel_size_and_sphere_aabb(
-            scene=scene,
-            confidence_level=self.config.confidence_level,
-            global_aabb_clip_quantile=self.config.global_aabb_clip_quantile,
-            global_aabb_padding_factor=self.config.global_aabb_padding_factor,
-            voxel_size_factor=self.config.voxel_size_factor,
-        )
-        
-        sphere_counts = scene.position.shape[0]
-        
-        
+        points: torch.Tensor,
+        point_transform: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """Forward pass: build grid if needed, then query.
+
+        This method is compatible with PyTorch nn.Module conventions.
+
+        Args:
+            scene: Gaussian scene (grid will be built if needed)
+            points: [N, 3] point cloud
+            point_transform: [4, 4] optional point transformation
+
+        Returns:
+            Dictionary with query results and optionally loss
+        """
+        # Build grid if needed
+        if not self._scene_built:
+            self.build_grid(scene)
+
+        # Query
+        query_result = self.query(points, point_transform)
+
+        result = {
+            'topk_sphere_ids': query_result.topk_sphere_ids,
+            'topk_densities': query_result.topk_densities,
+            'query_time_ms': query_result.query_time_ms,
+        }
+
+        # Compute loss if transform provided
+        if point_transform is not None and self._loss_fn is not None:
+            with torch.no_grad():
+                loss = self._loss_fn(points, point_transform)
+                result['loss'] = loss.item()
+
+        return result
+
+    # ========================================================================
+    # Utilities
+    # ========================================================================
+
+    def get_grid_info(self) -> Dict[str, Any]:
+        """Get information about the built grid.
+
+        Returns:
+            Dictionary with grid statistics
+        """
+        if not self._scene_built or self._grid_data is None:
+            return {'built': False}
+
+        return {
+            'built': True,
+            'num_spheres': self._num_spheres,
+            'voxel_size': self._grid_data.voxel_size,
+            'grid_dims': self._grid_data.grid_dims,
+            'total_pairs': self._grid_data.total_pairs,
+            'num_unique_voxels': self._grid_data.num_unique_voxels,
+        }
+
+    def is_ready(self) -> bool:
+        """Check if the aligner is ready for queries.
+
+        Returns:
+            True if grid is built and ready
+        """
+        return self._scene_built and self._grid_data is not None
+
+    def clear_cache(self) -> None:
+        """Clear cached grid data to free memory."""
+        self._grid_builder = None
+        self._grid_data = None
+        self._querier = None
+        self._loss_fn = None
+        self._registration = None
+        self._scene_built = False
+        self._num_spheres = 0
+        print("[GMMPointAlignment] Cache cleared.")
+
+
+# =============================================================================
+# Convenience Functions
+# =============================================================================
+
+def register_pointcloud(
+    scene: GaussianScenes,
+    pointcloud: torch.Tensor,
+    config: Optional[GMMPointAlignmentConfig] = None,
+    initial_transform: Optional[torch.Tensor] = None,
+) -> RegistrationResult:
+    """One-shot registration function.
+
+    Convenience function for simple use cases.
+
+    Args:
+        scene: Gaussian scene
+        pointcloud: [N, 3] point cloud to register
+        config: Optional alignment configuration
+        initial_transform: [4, 4] optional initial guess
+
+    Returns:
+        RegistrationResult
+
+    Example:
+        >>> result = register_pointcloud(scene, points)
+        >>> print(f"Transform: {result.transform}")
+    """
+    if config is None:
+        config = GMMPointAlignmentConfig()
+
+    aligner = GMMPointAlignment(config)
+    aligner.build_grid(scene)
+    return aligner.register(pointcloud, initial_transform)
+
+
+# =============================================================================
+# Usage Example
+# =============================================================================
+
+if __name__ == "__main__":
+    # Initialize Taichi
+    ti.init(arch=ti.cuda if torch.cuda.is_available() else ti.cpu)
+
+    from misc.hier_IO import GaussianScenes
+
+    # Create dummy data
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    scene = GaussianScenes(
+        position=torch.randn(1000, 3, device=device) * 5.0,
+        scales=torch.rand(1000, 3, device=device) * 0.3 + 0.1,
+        rotation=torch.randn(1000, 4, device=device),
+        opacities=torch.ones(1000, device=device),
+        shs=torch.randn(1000, 3, 16, device=device),
+    )
+    scene.rotation = scene.rotation / scene.rotation.norm(dim=1, keepdim=True)
+
+    pointcloud = torch.randn(500, 3, device=device)
+
+    # Example 1: Basic usage
+    print("\n" + "=" * 60)
+    print("Example 1: Basic Registration")
+    print("=" * 60)
+
+    aligner = GMMPointAlignment()
+    aligner.build_grid(scene)
+
+    # Query only
+    query_result = aligner.query(pointcloud)
+    print(f"\nQuery result:")
+    print(f"  Top-K IDs shape: {query_result.topk_sphere_ids.shape}")
+    print(f"  Query time: {query_result.query_time_ms:.2f}ms")
+
+    # Full registration
+    reg_result = aligner.register(pointcloud)
+    print(f"\nRegistration result:")
+    print(f"  Loss: {reg_result.loss:.4f}")
+    print(f"  Converged: {reg_result.converged}")
+
+    # Example 2: One-shot function
+    print("\n" + "=" * 60)
+    print("Example 2: One-shot Registration")
+    print("=" * 60)
+
+    result = register_pointcloud(scene, pointcloud)
+    print(f"Transform:\n{result.transform}")
+
+    # Example 3: With custom config
+    print("\n" + "=" * 60)
+    print("Example 3: Custom Configuration")
+    print("=" * 60)
+
+    config = GMMPointAlignmentConfig(
+        query_config=CSRGridQuerierConfig(top_k=16),
+        reg_config=RegistrationConfig(
+            num_iters=50,
+            lr=0.02,
+            multi_init=True,
+            num_init=3,
+        ),
+    )
+
+    aligner = GMMPointAlignment(config)
+    aligner.build_grid(scene)
+    result = aligner.align(pointcloud)
+
+    print(f"Total time: {result.total_time_ms:.2f}ms")
+    print(f"Final loss: {result.registration.loss:.4f}")
+
+    print("\n" + "=" * 60)
+    print("All examples completed!")
+    print("=" * 60)
