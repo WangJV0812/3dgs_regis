@@ -45,6 +45,8 @@ class UnifiedConfig:
         mle_use_scale: bool = False
         mle_multi_init: bool = True
         mle_num_init: int = 5
+        mle_debug: bool = False
+        mle_debug_gt_transform: Optional[torch.Tensor] = None
         # Sampler-specific configs (used when method="sampler")
         sampler_method: str = "svd_icp"
         sampler_max_iters: int = 100
@@ -62,6 +64,8 @@ class UnifiedConfig:
     mle_use_scale: bool = False
     mle_multi_init: bool = True
     mle_num_init: int = 5
+    mle_debug: bool = False
+    mle_debug_gt_transform: Optional[torch.Tensor] = None
 
     # Sampler configs
     sampler_method: str = "svd_icp"
@@ -155,6 +159,8 @@ class UnifiedRegistration:
             multi_init=self.config.mle_multi_init,
             num_init=self.config.mle_num_init,
             verbose=False,
+            debug=self.config.mle_debug,
+            debug_gt_transform=self.config.mle_debug_gt_transform,
         )
         self._mle_aligner = GMMRegistration(grid_data, reg_config=reg_config)
 

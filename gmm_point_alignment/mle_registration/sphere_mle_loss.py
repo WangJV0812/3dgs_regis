@@ -274,6 +274,8 @@ class RegistrationConfig:
         lr_decay_rate: LR decay factor (default: 0.5)
         use_scale: Optimize scale factor in addition to R and t (default: False)
         scale_lr: Learning rate for scale optimization (default: 0.001)
+        debug: Enable debug mode with visualization (default: False)
+        debug_gt_transform: Ground truth transform for error computation in debug mode (default: None)
     """
     num_iters: int = 1000
     lr: float = 0.01
@@ -288,6 +290,8 @@ class RegistrationConfig:
     lr_decay_rate: float = 0.5
     use_scale: bool = False
     scale_lr: float = 0.001
+    debug: bool = False
+    debug_gt_transform: Optional[torch.Tensor] = None
 
 
 class GMMRegistration:
@@ -396,6 +400,16 @@ class GMMRegistration:
         loss_history = []
         converged = False
 
+        # Debug tracking
+        if self.config.debug:
+            debug_history = {
+                'loss': [],
+                'rotation_error': [],
+                'translation_error': [],
+                'scale_error': [],
+                'scale': [],
+            }
+
         for i in range(self.config.num_iters):
             optimizer.zero_grad()
 
@@ -422,6 +436,47 @@ class GMMRegistration:
             # Tracking
             loss_val = loss.item()
             loss_history.append(loss_val)
+
+            # Debug tracking
+            if self.config.debug and self.config.debug_gt_transform is not None:
+                with torch.no_grad():
+                    # Get current transform
+                    if self.config.use_scale:
+                        T_current = sim3_exp(xi, log_scale)
+                        scale_val = torch.exp(log_scale).item()
+                    else:
+                        T_current = se3_exp(xi)
+                        scale_val = 1.0
+
+                    # Extract R, t from current transform
+                    R_current = T_current[:3, :3]
+                    t_current = T_current[:3, 3]
+
+                    # Extract ground truth
+                    R_gt = self.config.debug_gt_transform[:3, :3]
+                    t_gt = self.config.debug_gt_transform[:3, 3]
+                    scale_gt = torch.det(R_gt) ** (1/3)  # Assuming scale is encoded in R
+
+                    # Compute errors
+                    # Rotation error
+                    R_rel = R_current.T @ R_gt
+                    cos_angle = torch.clamp((R_rel.trace() - 1) / 2, -1, 1)
+                    rot_error = torch.acos(cos_angle).item() * 180 / 3.14159
+
+                    # Translation error
+                    trans_error = (t_current - t_gt).norm().item()
+
+                    # Scale error
+                    if self.config.use_scale:
+                        scale_err = abs(scale_val - scale_gt.item())
+                    else:
+                        scale_err = 0.0
+
+                    debug_history['loss'].append(loss_val)
+                    debug_history['rotation_error'].append(rot_error)
+                    debug_history['translation_error'].append(trans_error)
+                    debug_history['scale_error'].append(scale_err)
+                    debug_history['scale'].append(scale_val)
 
             # Update best
             if loss_val < best_loss - self.config.convergence_threshold:
@@ -477,7 +532,65 @@ class GMMRegistration:
             'scale': final_scale,
         }
 
+        # Plot debug visualization
+        if self.config.debug and self.config.debug_gt_transform is not None:
+            self._plot_debug_curves(debug_history)
+
         return result
+
+    def _plot_debug_curves(self, debug_history: dict):
+        """Plot training curves for debugging."""
+        import matplotlib.pyplot as plt
+
+        num_plots = 4 if self.config.use_scale else 3
+        fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 4))
+        if num_plots == 1:
+            axes = [axes]
+
+        iters = range(len(debug_history['loss']))
+
+        # Loss curve
+        ax = axes[0]
+        ax.plot(iters, debug_history['loss'], 'b-', linewidth=1.5)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Loss')
+        ax.set_title('Loss Curve')
+        ax.grid(True, alpha=0.3)
+
+        # Rotation error
+        ax = axes[1]
+        ax.plot(iters, debug_history['rotation_error'], 'r-', linewidth=1.5)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Rotation Error (°)')
+        ax.set_title('Rotation Error')
+        ax.grid(True, alpha=0.3)
+
+        # Translation error
+        ax = axes[2]
+        ax.plot(iters, debug_history['translation_error'], 'g-', linewidth=1.5)
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Translation Error (m)')
+        ax.set_title('Translation Error')
+        ax.grid(True, alpha=0.3)
+
+        # Scale error (if applicable)
+        if self.config.use_scale:
+            ax = axes[3]
+            ax.plot(iters, debug_history['scale_error'], 'm-', linewidth=1.5, label='Error')
+            ax_twin = ax.twinx()
+            ax_twin.plot(iters, debug_history['scale'], 'c--', linewidth=1.5, label='Scale')
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Scale Error', color='m')
+            ax_twin.set_ylabel('Scale Value', color='c')
+            ax.set_title('Scale Error & Value')
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(axis='y', labelcolor='m')
+            ax_twin.tick_params(axis='y', labelcolor='c')
+
+        plt.tight_layout()
+        plt.savefig('registration_debug.png', dpi=150, bbox_inches='tight')
+        print(f"  [Debug] Saved training curves to registration_debug.png")
+        plt.close()
 
     def _register_multi_init(
         self,
