@@ -61,6 +61,8 @@ class UnifiedConfig:
     mle_voxel_factor: float = 1.0
     mle_num_iters: int = 100
     mle_lr: float = 0.01
+    mle_lr_translation: float = 0.01
+    mle_lr_rotation: float = 0.001
     mle_use_scale: bool = False
     mle_multi_init: bool = True
     mle_num_init: int = 5
@@ -155,6 +157,8 @@ class UnifiedRegistration:
         reg_config = MLERegistrationConfig(
             num_iters=self.config.mle_num_iters,
             lr=self.config.mle_lr,
+            lr_translation=self.config.mle_lr_translation,
+            lr_rotation=self.config.mle_lr_rotation,
             use_scale=self.config.mle_use_scale,
             multi_init=self.config.mle_multi_init,
             num_init=self.config.mle_num_init,

@@ -262,7 +262,9 @@ class RegistrationConfig:
 
     Args:
         num_iters: Maximum optimization iterations (default: 100)
-        lr: Learning rate (default: 0.01)
+        lr: Base learning rate (default: 0.01)
+        lr_translation: Learning rate for translation (default: 0.01)
+        lr_rotation: Learning rate for rotation (default: 0.001)
         convergence_threshold: Loss change threshold for convergence (default: 1e-4)
         patience: Iterations without improvement before early stop (default: 20)
         multi_init: Use multiple random initializations (default: True)
@@ -279,6 +281,8 @@ class RegistrationConfig:
     """
     num_iters: int = 1000
     lr: float = 0.01
+    lr_translation: float = 0.01
+    lr_rotation: float = 0.001
     convergence_threshold: float = 1e-4
     patience: int = 20
     multi_init: bool = True
@@ -375,14 +379,27 @@ class GMMRegistration:
             params = [xi]
             log_scale = None
 
-        # Optimizer with different LR for scale
+        # Split xi into translation (first 3) and rotation (last 3)
+        xi_t = xi[:3].clone().detach().requires_grad_(True)
+        xi_r = xi[3:].clone().detach().requires_grad_(True)
+
+        # Optimizer with different LR for translation, rotation, and scale
+        # Translation usually needs larger LR, rotation needs smaller LR
+        lr_t = getattr(self.config, 'lr_translation', self.config.lr)
+        lr_r = getattr(self.config, 'lr_rotation', self.config.lr * 0.1)
+
         if self.config.use_scale:
+            log_scale = log_scale.clone().detach().requires_grad_(True)
             optimizer = torch.optim.Adam([
-                {'params': [xi], 'lr': self.config.lr},
+                {'params': [xi_t], 'lr': lr_t},
+                {'params': [xi_r], 'lr': lr_r},
                 {'params': [log_scale], 'lr': self.config.scale_lr},
             ])
         else:
-            optimizer = torch.optim.Adam([xi], lr=self.config.lr)
+            optimizer = torch.optim.Adam([
+                {'params': [xi_t], 'lr': lr_t},
+                {'params': [xi_r], 'lr': lr_r},
+            ])
 
         # LR scheduler
         if self.config.lr_scheduler:
@@ -394,7 +411,8 @@ class GMMRegistration:
 
         # Tracking
         best_loss = float('inf')
-        best_xi = xi.clone().detach()
+        best_xi_t = xi_t.clone().detach()
+        best_xi_r = xi_r.clone().detach()
         best_log_scale = log_scale.clone().detach() if self.config.use_scale else None
         patience_counter = 0
         loss_history = []
@@ -413,6 +431,9 @@ class GMMRegistration:
         for i in range(self.config.num_iters):
             optimizer.zero_grad()
 
+            # Reconstruct xi from split parameters
+            xi = torch.cat([xi_t, xi_r])
+
             # Forward
             if self.config.use_scale:
                 T = sim3_exp(xi, log_scale)
@@ -423,8 +444,9 @@ class GMMRegistration:
             # Backward
             loss.backward()
 
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(xi, max_norm=1.0)
+            # Gradient clipping (separate for translation and rotation)
+            torch.nn.utils.clip_grad_norm_(xi_t, max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(xi_r, max_norm=0.5)  # Smaller clip for rotation
             if self.config.use_scale:
                 torch.nn.utils.clip_grad_norm_(log_scale, max_norm=0.1)
 
@@ -440,7 +462,8 @@ class GMMRegistration:
             # Debug tracking
             if self.config.debug and self.config.debug_gt_transform is not None:
                 with torch.no_grad():
-                    # Get current transform
+                    # Reconstruct xi and get current transform
+                    xi = torch.cat([xi_t, xi_r])
                     if self.config.use_scale:
                         T_current = sim3_exp(xi, log_scale)
                         scale_val = torch.exp(log_scale).item()
@@ -481,7 +504,8 @@ class GMMRegistration:
             # Update best
             if loss_val < best_loss - self.config.convergence_threshold:
                 best_loss = loss_val
-                best_xi = xi.clone().detach()
+                best_xi_t = xi_t.clone().detach()
+                best_xi_r = xi_r.clone().detach()
                 if self.config.use_scale:
                     best_log_scale = log_scale.clone().detach()
                 patience_counter = 0
@@ -498,6 +522,7 @@ class GMMRegistration:
             # Logging
             if self.config.verbose and i % 10 == 0:
                 with torch.no_grad():
+                    xi = torch.cat([xi_t, xi_r])
                     if self.config.use_scale:
                         T_debug = sim3_exp(xi, log_scale)
                         scale_val = torch.exp(log_scale).item()
@@ -505,14 +530,17 @@ class GMMRegistration:
                         T_debug = se3_exp(xi)
                         scale_val = 1.0
                     details = self.loss_fn.forward_with_details(points, T_debug)
-                    lr_current = optimizer.param_groups[0]['lr']
+                    lr_t = optimizer.param_groups[0]['lr']
+                    lr_r = optimizer.param_groups[1]['lr']
                     scale_info = f", s={scale_val:.4f}" if self.config.use_scale else ""
                     print(f"  Iter {i:3d}: loss={loss_val:.4f}, "
                           f"inlier={details['inlier_ratio'].item():.3f}{scale_info}, "
-                          f"lr={lr_current:.4e}")
+                          f"lr_t={lr_t:.4e}, lr_r={lr_r:.4e}")
 
         # Return best result
         with torch.no_grad():
+            # Reconstruct best xi from split parameters
+            best_xi = torch.cat([best_xi_t, best_xi_r])
             if self.config.use_scale:
                 T_best = sim3_exp(best_xi, best_log_scale)
                 final_scale = torch.exp(best_log_scale)

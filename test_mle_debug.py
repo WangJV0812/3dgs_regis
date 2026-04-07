@@ -58,13 +58,15 @@ config = UnifiedConfig(
     method=RegistrationMethod.MLE,
     mle_voxel_strategy="median_radius",
     mle_voxel_factor=1.0,
-    mle_num_iters=100,
+    mle_num_iters=200,
     mle_lr=0.01,
+    mle_lr_translation=0.001,  # Much smaller LR for translation
+    mle_lr_rotation=0.05,      # Larger LR for rotation
     mle_use_scale=False,
-    mle_multi_init=False,  # Single init for cleaner curves
-    mle_num_init=1,
+    mle_multi_init=True,
+    mle_num_init=5,
     mle_debug=True,
-    mle_debug_gt_transform=torch.inverse(T_true),  # Use inverse as ground truth
+    mle_debug_gt_transform=torch.inverse(T_true),
 )
 
 reg = UnifiedRegistration(config)
