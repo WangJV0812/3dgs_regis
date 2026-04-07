@@ -64,7 +64,7 @@ config = UnifiedConfig(
     mle_multi_init=False,  # Single init for cleaner curves
     mle_num_init=1,
     mle_debug=True,
-    mle_debug_gt_transform=T_true,
+    mle_debug_gt_transform=torch.inverse(T_true),  # Use inverse as ground truth
 )
 
 reg = UnifiedRegistration(config)
@@ -74,13 +74,31 @@ print(f"\nResults:")
 print(f"  Converged: {result.converged}")
 print(f"  Loss: {result.error:.4f}")
 print(f"  Scale: {result.scale:.4f}")
-print(f"  Translation error: {(result.t - t_true).norm().item():.4f}m")
 
+# Compute ground truth inverse transform
+# If pointcloud_transformed = T_true(pointcloud),
+# then to align back: T_inv(pointcloud_transformed) = pointcloud
+T_true_inv = torch.inverse(T_true)
+R_true_inv = T_true_inv[:3, :3]
+t_true_inv = T_true_inv[:3, 3]
+
+print(f"\n  Expected transform (inverse of T_true):")
+print(f"    Translation: {t_true_inv.cpu().numpy()}")
+print(f"    Rotation angle: {np.degrees(torch.acos((R_true_inv.trace()-1)/2).item()):.2f}°")
+
+print(f"\n  Recovered transform:")
+print(f"    Translation: {result.t.cpu().numpy()}")
 R_result = result.R
-R_rel = R_result.T @ R_true
+print(f"    Rotation angle: {np.degrees(torch.acos((R_result.trace()-1)/2).item()):.2f}°")
+
+t_error = (result.t - t_true_inv).norm().item()
+R_rel = R_result.T @ R_true_inv
 cos_angle = torch.clamp((R_rel.trace() - 1) / 2, -1, 1)
 angle_error = torch.acos(cos_angle).item() * 180 / np.pi
-print(f"  Rotation error: {angle_error:.2f}°")
+
+print(f"\n  Errors (comparing to inverse transform):")
+print(f"    Translation error: {t_error:.4f}m")
+print(f"    Rotation error: {angle_error:.2f}°")
 
 print(f"\n{'=' * 70}")
 print("Debug visualization saved to: registration_debug.png")
