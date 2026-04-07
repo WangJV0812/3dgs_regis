@@ -165,7 +165,10 @@ mle_time = time() - start_time
 
 # Compute errors
 R_recovered = result_mle.R
-angle_error = torch.acos(torch.clamp((R_recovered.T @ R_true).trace() - 1, -1, 1) / 2)
+# Correct rotation error: theta = acos((trace(R_rel) - 1) / 2)
+R_rel = R_recovered.T @ R_true
+cos_angle = torch.clamp((R_rel.trace() - 1) / 2, -1, 1)
+angle_error = torch.acos(cos_angle)
 
 print(f"\nMLE Results:")
 print(f"  Time: {mle_time:.2f}s")
@@ -201,7 +204,9 @@ sampler_time = time() - start_time
 
 # Compute errors
 R_recovered = result_sampler.R
-angle_error = torch.acos(torch.clamp((R_recovered.T @ R_true).trace() - 1, -1, 1) / 2)
+R_rel = R_recovered.T @ R_true
+cos_angle = torch.clamp((R_rel.trace() - 1) / 2, -1, 1)
+angle_error = torch.acos(cos_angle)
 
 print(f"\nSampler Results:")
 print(f"  Time: {sampler_time:.2f}s")
