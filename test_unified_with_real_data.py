@@ -163,10 +163,14 @@ reg_mle = UnifiedRegistration(config_mle)
 result_mle = reg_mle.register(scene, pointcloud_transformed)
 mle_time = time() - start_time
 
-# Compute errors
+# Compute ground truth inverse transform
+T_true_inv = torch.inverse(T_true)
+R_true_inv = T_true_inv[:3, :3]
+t_true_inv = T_true_inv[:3, 3]
+
+# Compute errors (comparing to inverse transform)
 R_recovered = result_mle.R
-# Correct rotation error: theta = acos((trace(R_rel) - 1) / 2)
-R_rel = R_recovered.T @ R_true
+R_rel = R_recovered.T @ R_true_inv
 cos_angle = torch.clamp((R_rel.trace() - 1) / 2, -1, 1)
 angle_error = torch.acos(cos_angle)
 
@@ -177,7 +181,7 @@ print(f"  Converged: {result_mle.converged}")
 print(f"  Loss: {result_mle.error:.4f}")
 print(f"  Iters: {result_mle.num_iters}")
 print(f"  Scale: {result_mle.scale:.4f}")
-print(f"  Translation error: {(result_mle.t - t_true).norm().item():.4f}m")
+print(f"  Translation error: {(result_mle.t - t_true_inv).norm().item():.4f}m")
 print(f"  Rotation error: {np.degrees(angle_error.item()):.2f}°")
 
 # =============================================================================
@@ -202,9 +206,9 @@ reg_sampler = UnifiedRegistration(config_sampler)
 result_sampler = reg_sampler.register(scene, pointcloud_transformed)
 sampler_time = time() - start_time
 
-# Compute errors
+# Compute errors (comparing to inverse transform)
 R_recovered = result_sampler.R
-R_rel = R_recovered.T @ R_true
+R_rel = R_recovered.T @ R_true_inv
 cos_angle = torch.clamp((R_rel.trace() - 1) / 2, -1, 1)
 angle_error = torch.acos(cos_angle)
 
@@ -215,7 +219,7 @@ print(f"  Converged: {result_sampler.converged}")
 print(f"  RMSE: {result_sampler.error:.4f}")
 print(f"  Iters: {result_sampler.num_iters}")
 print(f"  Scale: {result_sampler.scale:.4f}")
-print(f"  Translation error: {(result_sampler.t - t_true).norm().item():.4f}m")
+print(f"  Translation error: {(result_sampler.t - t_true_inv).norm().item():.4f}m")
 print(f"  Rotation error: {np.degrees(angle_error.item()):.2f}°")
 
 # =============================================================================
@@ -231,7 +235,7 @@ print(f"{'Time (s)':<30} {mle_time:<20.2f} {sampler_time:<20.2f}")
 print(f"{'Error metric':<30} {result_mle.error:<20.4f} {result_sampler.error:<20.4f}")
 print(f"{'Scale':<30} {result_mle.scale:<20.4f} {result_sampler.scale:<20.4f}")
 print(f"{'Converged':<30} {str(result_mle.converged):<20} {str(result_sampler.converged):<20}")
-print(f"{'Translation error (m)':<30} {(result_mle.t - t_true).norm().item():<20.4f} {(result_sampler.t - t_true).norm().item():<20.4f}")
+print(f"{'Translation error (m)':<30} {(result_mle.t - t_true_inv).norm().item():<20.4f} {(result_sampler.t - t_true_inv).norm().item():<20.4f}")
 
 # =============================================================================
 # Test 3: MLE with Scale Optimization
