@@ -15,6 +15,12 @@ from .gaussian_sampler import (
     SamplingConfig,
     SampledPointCloud,
 )
+from .topk_sampler_registration import (
+    TopKSamplerConfig,
+    TopKSamplerResult,
+    TopKSamplerRegistration,
+    register_with_topk_sampler,
+)
 
 __all__ = [
     "RegistrationSamplerConfig",
@@ -24,4 +30,8 @@ __all__ = [
     "GaussianSampler",
     "SamplingConfig",
     "SampledPointCloud",
+    "TopKSamplerConfig",
+    "TopKSamplerResult",
+    "TopKSamplerRegistration",
+    "register_with_topk_sampler",
 ]

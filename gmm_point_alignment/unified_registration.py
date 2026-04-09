@@ -1,8 +1,9 @@
-"""Unified registration interface supporting both MLE and sampler-based methods.
+"""Unified registration interface supporting multiple registration methods.
 
 This module provides a unified interface to switch between:
-- registration_mle: GMM MLE-based registration using CSR Grid
-- registration_sampler: Traditional ICP-based registration using point cloud sampling
+- MLE: GMM MLE-based registration using CSR Grid
+- SAMPLER: Traditional ICP-based registration using point cloud sampling
+- TOPK_SAMPLER: ICP with Top-K sphere sampling (localized sampling)
 
 Example:
     >>> from gmm_point_alignment.unified_registration import (
@@ -27,8 +28,9 @@ from misc.hier_IO import GaussianScenes
 
 class RegistrationMethod(str, Enum):
     """Available registration methods."""
-    MLE = "mle"           # GMM MLE-based using CSR Grid
-    SAMPLER = "sampler"   # Traditional ICP using point sampling
+    MLE = "mle"                   # GMM MLE-based using CSR Grid
+    SAMPLER = "sampler"           # Traditional ICP using point sampling
+    TOPK_SAMPLER = "topk_sampler" # ICP with Top-K sphere sampling
 
 
 @dataclass
@@ -36,7 +38,7 @@ class UnifiedConfig:
     """Unified configuration for registration.
 
     Args:
-        method: Registration method to use ("mle" or "sampler")
+        method: Registration method to use ("mle", "sampler", or "topk_sampler")
         # MLE-specific configs (used when method="mle")
         mle_voxel_strategy: str = "median_radius"
         mle_voxel_factor: float = 1.0
@@ -54,6 +56,16 @@ class UnifiedConfig:
         sampler_num_points: int = 5000
         sampler_multi_init: bool = True
         sampler_num_init: int = 5
+        # Top-K Sampler-specific configs (used when method="topk_sampler")
+        topk_sampler_k: int = 8
+        topk_sampler_samples_per_sphere: int = 10
+        topk_sampler_sampling_mode: str = "random"
+        topk_sampler_voxel_strategy: str = "median_radius"
+        topk_sampler_voxel_factor: float = 1.0
+        topk_sampler_reg_method: str = "svd_icp"
+        topk_sampler_max_iters: int = 100
+        topk_sampler_multi_init: bool = True
+        topk_sampler_num_init: int = 5
     """
     method: RegistrationMethod = RegistrationMethod.MLE
 
@@ -77,6 +89,17 @@ class UnifiedConfig:
     sampler_num_points: int = 5000
     sampler_multi_init: bool = True
     sampler_num_init: int = 5
+
+    # Top-K Sampler configs
+    topk_sampler_k: int = 8
+    topk_sampler_samples_per_sphere: int = 10
+    topk_sampler_sampling_mode: str = "random"
+    topk_sampler_voxel_strategy: str = "median_radius"
+    topk_sampler_voxel_factor: float = 1.0
+    topk_sampler_reg_method: str = "svd_icp"
+    topk_sampler_max_iters: int = 100
+    topk_sampler_multi_init: bool = True
+    topk_sampler_num_init: int = 5
 
 
 @dataclass
@@ -123,6 +146,7 @@ class UnifiedRegistration:
         self.config = config or UnifiedConfig()
         self._mle_aligner = None
         self._sampler_config = None
+        self._topk_sampler_reg = None
 
     def _init_mle(self, scene: GaussianScenes):
         """Initialize MLE registration components."""
@@ -202,6 +226,53 @@ class UnifiedRegistration:
             num_init=self.config.sampler_num_init,
         )
 
+    def _init_topk_sampler(self):
+        """Initialize Top-K sampler registration components."""
+        from .mle_registration import VoxelSizeStrategy
+        from .sampler_registration import (
+            TopKSamplerRegistration,
+            TopKSamplerConfig,
+            SamplerRegistrationMethod,
+        )
+
+        # Map voxel strategy string to enum
+        strategy_map = {
+            "median_radius": VoxelSizeStrategy.MEDIAN_RADIUS,
+            "short_axis_median": VoxelSizeStrategy.SHORT_AXIS_MEDIAN,
+            "short_axis_mode": VoxelSizeStrategy.SHORT_AXIS_MODE,
+            "volume_based": VoxelSizeStrategy.VOLUME_BASED,
+            "percentile_dense": VoxelSizeStrategy.PERCENTILE_DENSE,
+        }
+        strategy = strategy_map.get(
+            self.config.topk_sampler_voxel_strategy,
+            VoxelSizeStrategy.MEDIAN_RADIUS
+        )
+
+        # Map registration method string to enum
+        method_map = {
+            "svd_icp": SamplerRegistrationMethod.SVD_ICP,
+            "chamfer_opt": SamplerRegistrationMethod.CHAMFER_OPT,
+            "open3d_icp_point_to_point": SamplerRegistrationMethod.OPEN3D_ICP_POINT_TO_POINT,
+            "open3d_icp_point_to_plane": SamplerRegistrationMethod.OPEN3D_ICP_POINT_TO_PLANE,
+        }
+        reg_method = method_map.get(
+            self.config.topk_sampler_reg_method,
+            SamplerRegistrationMethod.SVD_ICP
+        )
+
+        config = TopKSamplerConfig(
+            voxel_size_strategy=strategy,
+            voxel_size_factor=self.config.topk_sampler_voxel_factor,
+            top_k=self.config.topk_sampler_k,
+            samples_per_sphere=self.config.topk_sampler_samples_per_sphere,
+            sampling_mode=self.config.topk_sampler_sampling_mode,
+            reg_method=reg_method,
+            reg_max_iterations=self.config.topk_sampler_max_iters,
+            reg_multi_init=self.config.topk_sampler_multi_init,
+            reg_num_init=self.config.topk_sampler_num_init,
+        )
+        self._topk_sampler_reg = TopKSamplerRegistration(config)
+
     def register(
         self,
         scene: GaussianScenes,
@@ -220,6 +291,8 @@ class UnifiedRegistration:
             return self._register_mle(scene, pointcloud)
         elif self.config.method == RegistrationMethod.SAMPLER:
             return self._register_sampler(scene, pointcloud)
+        elif self.config.method == RegistrationMethod.TOPK_SAMPLER:
+            return self._register_topk_sampler(scene, pointcloud)
         else:
             raise ValueError(f"Unknown method: {self.config.method}")
 
@@ -297,6 +370,33 @@ class UnifiedRegistration:
             method="sampler",
         )
 
+    def _register_topk_sampler(
+        self,
+        scene: GaussianScenes,
+        pointcloud: torch.Tensor,
+    ) -> UnifiedResult:
+        """Register using Top-K sampler method."""
+        if self._topk_sampler_reg is None:
+            self._init_topk_sampler()
+
+        result = self._topk_sampler_reg.register(scene, pointcloud)
+
+        # Build 4x4 transform
+        transform = torch.eye(4, device=pointcloud.device)
+        transform[:3, :3] = result.R
+        transform[:3, 3] = result.t
+
+        return UnifiedResult(
+            transform=transform,
+            R=result.R,
+            t=result.t,
+            scale=result.scale,
+            converged=result.converged,
+            error=result.rmse,
+            num_iters=result.num_iters,
+            method="topk_sampler",
+        )
+
 
 def register_pointcloud(
     scene: GaussianScenes,
@@ -311,7 +411,7 @@ def register_pointcloud(
     Args:
         scene: Gaussian scene
         pointcloud: Point cloud to register [N, 3]
-        method: "mle" or "sampler"
+        method: "mle", "sampler", or "topk_sampler"
         **kwargs: Additional config options
 
     Returns:
