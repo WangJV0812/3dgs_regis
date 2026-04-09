@@ -5,6 +5,7 @@ Implements negative log-likelihood loss for point-to-sphere registration.
 
 import torch
 import torch.nn as nn
+import numpy as np
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple
 
@@ -22,11 +23,18 @@ class MLELossConfig:
         min_opacity: Minimum opacity threshold for valid spheres (default: 1e-3)
         use_weighted: Use opacity as mixture weight (default: True)
         batch_size: Batch size for processing large point clouds (default: 10000)
+        # Robust kernel options
+        robust_kernel: str = "none"  # "none", "huber", "cauchy", "geman_mcclure"
+        kernel_threshold: float = 0.1  # Threshold for robust kernels
+        use_point_confidence: bool = False  # Use per-point confidence weights
     """
     top_k: int = 8
     min_opacity: float = 1e-3
     use_weighted: bool = True
     batch_size: int = 10000
+    robust_kernel: str = "none"
+    kernel_threshold: float = 0.1
+    use_point_confidence: bool = False
 
 
 class MLEAlignmentLoss(nn.Module):
@@ -73,16 +81,50 @@ class MLEAlignmentLoss(nn.Module):
         else:
             self.has_opacities = False
 
+    def _apply_robust_kernel(self, nll: torch.Tensor) -> torch.Tensor:
+        """Apply robust kernel to negative log-likelihood.
+
+        Args:
+            nll: Raw NLL values [N]
+
+        Returns:
+            Robust NLL values [N]
+        """
+        kernel = self.config.robust_kernel
+        c = self.config.kernel_threshold
+
+        if kernel == "none" or c <= 0:
+            return nll
+        elif kernel == "huber":
+            # Huber loss: quadratic for small values, linear for large
+            mask = nll <= c
+            robust_nll = torch.where(
+                mask,
+                nll,  # quadratic region
+                2 * c * torch.sqrt(nll) - c  # linear region
+            )
+            return robust_nll
+        elif kernel == "cauchy":
+            # Cauchy loss: c^2 * log(1 + (x/c)^2)
+            return c**2 * torch.log(1 + nll / (c**2))
+        elif kernel == "geman_mcclure":
+            # Geman-McClure: x^2 / (c^2 + x^2) * c^2
+            return nll * c**2 / (c**2 + nll)
+        else:
+            return nll
+
     def forward(
         self,
         points: torch.Tensor,
         transform: torch.Tensor,
+        point_confidence: torch.Tensor = None,
     ) -> torch.Tensor:
         """Compute negative log-likelihood loss.
 
         Args:
             points: [N, 3] query points
             transform: [4, 4] transformation matrix (differentiable)
+            point_confidence: [N] optional per-point confidence weights
 
         Returns:
             loss: scalar (mean NLL over all points)
@@ -91,7 +133,7 @@ class MLEAlignmentLoss(nn.Module):
         points_transformed = transform_points(points, transform)
 
         # Compute NLL
-        nll = self._compute_nll(points_transformed)
+        nll = self._compute_nll(points_transformed, point_confidence)
 
         return nll
 
@@ -124,11 +166,12 @@ class MLEAlignmentLoss(nn.Module):
             'inlier_ratio': details['inlier_ratio'],
         }
 
-    def _compute_nll(self, points: torch.Tensor) -> torch.Tensor:
+    def _compute_nll(self, points: torch.Tensor, point_confidence: torch.Tensor = None) -> torch.Tensor:
         """Compute negative log-likelihood (vectorized).
 
         Args:
             points: [N, 3] transformed points
+            point_confidence: [N] optional per-point confidence weights
 
         Returns:
             nll: scalar (mean)
@@ -192,6 +235,14 @@ class MLEAlignmentLoss(nn.Module):
         # Handle points with no valid associations
         has_valid = (valid_mask.sum(dim=-1) > 0).float()  # [N]
         nll = nll * has_valid + (1 - has_valid) * 1000  # Large penalty for no association
+
+        # Apply robust kernel
+        nll = self._apply_robust_kernel(nll)
+
+        # Apply point confidence weights
+        if point_confidence is not None and self.config.use_point_confidence:
+            nll = nll * point_confidence
+            return nll.sum() / (point_confidence.sum() + 1e-8)
 
         return nll.mean()
 
@@ -278,6 +329,8 @@ class RegistrationConfig:
         scale_lr: Learning rate for scale optimization (default: 0.001)
         debug: Enable debug mode with visualization (default: False)
         debug_gt_transform: Ground truth transform for error computation in debug mode (default: None)
+        use_pca_init: Use PCA-based initialization (default: False)
+        pca_scale_range: Search range for scale initialization [min, max] (default: [0.1, 10.0])
     """
     num_iters: int = 1000
     lr: float = 0.01
@@ -296,6 +349,8 @@ class RegistrationConfig:
     scale_lr: float = 0.001
     debug: bool = False
     debug_gt_transform: Optional[torch.Tensor] = None
+    use_pca_init: bool = False
+    pca_scale_range: tuple = (0.1, 10.0)
 
 
 class GMMRegistration:
@@ -324,12 +379,14 @@ class GMMRegistration:
         self,
         points: torch.Tensor,
         initial_transform: Optional[torch.Tensor] = None,
+        point_confidence: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Register point cloud to scene using MLE with multi-init.
 
         Args:
             points: [N, 3] point cloud
             initial_transform: [4, 4] initial guess (optional, overrides multi_init)
+            point_confidence: [N] optional per-point confidence weights
 
         Returns:
             dict with:
@@ -344,15 +401,15 @@ class GMMRegistration:
 
         if initial_transform is not None:
             # Single optimization from provided initial
-            result = self._optimize_single(points, initial_transform)
+            result = self._optimize_single(points, initial_transform, point_confidence=point_confidence)
             return result
 
         if self.config.multi_init:
             # Multiple random initializations
-            return self._register_multi_init(points)
+            return self._register_multi_init(points, point_confidence=point_confidence)
         else:
             # Single optimization from identity
-            result = self._optimize_single(points, torch.eye(4, device=device))
+            result = self._optimize_single(points, torch.eye(4, device=device), point_confidence=point_confidence)
             return result
 
     def _optimize_single(
@@ -360,6 +417,7 @@ class GMMRegistration:
         points: torch.Tensor,
         initial_transform: torch.Tensor,
         initial_log_scale: float = 0.0,
+        point_confidence: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Single optimization run with convergence detection."""
         from gmm_point_alignment.transform_utils import se3_log, sim3_log, sim3_exp
@@ -439,7 +497,7 @@ class GMMRegistration:
                 T = sim3_exp(xi, log_scale)
             else:
                 T = se3_exp(xi)
-            loss = self.loss_fn(points, T)
+            loss = self.loss_fn(points, T, point_confidence)
 
             # Backward
             loss.backward()
@@ -623,6 +681,7 @@ class GMMRegistration:
     def _register_multi_init(
         self,
         points: torch.Tensor,
+        point_confidence: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Multi-initialization strategy."""
         device = points.device
@@ -634,18 +693,30 @@ class GMMRegistration:
         initializations = []
         scale_inits = []
 
-        # Always include identity
-        initializations.append(torch.eye(4, device=device))
-        scale_inits.append(0.0)  # log_scale = 0 -> scale = 1.0
+        # Option 1: PCA-based initialization (if enabled)
+        if self.config.use_pca_init:
+            R_pca, scale_pca = self._compute_pca_init(points, self.grid_data.sphere_centers)
+            T_pca = torch.eye(4, device=device)
+            T_pca[:3, :3] = R_pca
+            initializations.append(T_pca)
+            scale_inits.append(np.log(scale_pca) if self.config.use_scale else 0.0)
+            if self.config.verbose:
+                print(f"  PCA init: scale={scale_pca:.3f}")
+        else:
+            # Always include identity
+            initializations.append(torch.eye(4, device=device))
+            scale_inits.append(0.0)  # log_scale = 0 -> scale = 1.0
 
         # Add random perturbations
-        for _ in range(self.config.num_init - 1):
+        num_random = self.config.num_init - len(initializations)
+        for _ in range(num_random):
             xi = torch.randn(6, device=device) * self.config.init_noise_scale
             T = se3_exp(xi)
             initializations.append(T)
             if self.config.use_scale:
-                # Random log scale: -0.2 to 0.2 (scale 0.8 to 1.2)
-                log_s = (torch.rand(1, device=device).item() - 0.5) * 0.4
+                # Random log scale within pca_scale_range
+                scale_min, scale_max = self.config.pca_scale_range
+                log_s = np.log(scale_min) + torch.rand(1).item() * np.log(scale_max / scale_min)
                 scale_inits.append(log_s)
             else:
                 scale_inits.append(0.0)
@@ -657,7 +728,7 @@ class GMMRegistration:
                 scale_str = f" (scale={torch.exp(torch.tensor(s_init)).item():.3f})" if self.config.use_scale else ""
                 print(f"\nTrial {i+1}/{len(initializations)}:{scale_str}")
 
-            result = self._optimize_single(points, T_init, s_init)
+            result = self._optimize_single(points, T_init, s_init, point_confidence)
             results.append(result)
 
         # Select best result
@@ -672,6 +743,68 @@ class GMMRegistration:
             print(f"{'='*60}")
 
         return best_result
+
+    def _compute_pca_init(
+        self,
+        points: torch.Tensor,
+        scene_centers: torch.Tensor,
+    ) -> tuple[torch.Tensor, float]:
+        """Compute PCA-based initialization for scale and rotation.
+
+        Uses PCA on point clouds to align principal axes.
+
+        Args:
+            points: [N, 3] input point cloud
+            scene_centers: [M, 3] Gaussian scene centers
+
+        Returns:
+            R_init: [3, 3] initial rotation matrix
+            scale_init: initial scale factor
+        """
+        device = points.device
+
+        # Center the point clouds
+        p_center = points.mean(dim=0)
+        s_center = scene_centers.mean(dim=0)
+
+        p_centered = points - p_center
+        s_centered = scene_centers - s_center
+
+        # Compute covariance matrices
+        p_cov = p_centered.T @ p_centered / points.shape[0]
+        s_cov = s_centered.T @ scene_centers / scene_centers.shape[0]
+
+        # Eigendecomposition
+        p_eigvals, p_eigvecs = torch.linalg.eigh(p_cov)
+        s_eigvals, s_eigvecs = torch.linalg.eigh(s_cov)
+
+        # Sort by eigenvalue magnitude (descending)
+        p_idx = torch.argsort(p_eigvals, descending=True)
+        s_idx = torch.argsort(s_eigvals, descending=True)
+
+        p_eigvecs = p_eigvecs[:, p_idx]
+        s_eigvecs = s_eigvecs[:, s_idx]
+
+        p_eigvals = p_eigvals[p_idx]
+        s_eigvals = s_eigvals[s_idx]
+
+        # Estimate scale from eigenvalue ratios
+        # Use the largest eigenvalue ratio as scale estimate
+        scale_estimate = torch.sqrt(s_eigvals[0] / (p_eigvals[0] + 1e-8))
+
+        # Clamp scale to reasonable range
+        scale_min, scale_max = self.config.pca_scale_range
+        scale_estimate = torch.clamp(scale_estimate, scale_min, scale_max)
+
+        # Compute rotation: align principal axes
+        # R @ p_axes = s_axes  =>  R = s_axes @ p_axes^T
+        R_init = s_eigvecs @ p_eigvecs.T
+
+        # Ensure proper rotation (det = 1)
+        if torch.det(R_init) < 0:
+            R_init[:, 2] *= -1
+
+        return R_init, scale_estimate.item()
 
     def register_with_icp_init(
         self,

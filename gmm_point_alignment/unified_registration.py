@@ -44,10 +44,17 @@ class UnifiedConfig:
         mle_voxel_factor: float = 1.0
         mle_num_iters: int = 100
         mle_lr: float = 0.01
+        mle_lr_translation: float = 0.01
+        mle_lr_rotation: float = 0.001
         mle_use_scale: bool = False
         mle_multi_init: bool = True
         mle_num_init: int = 5
         mle_top_k: int = 8
+        # Robust MLE options
+        mle_robust_kernel: str = "none"  # "none", "huber", "cauchy", "geman_mcclure"
+        mle_kernel_threshold: float = 0.1
+        mle_use_pca_init: bool = False
+        mle_pca_scale_range: tuple = (0.1, 10.0)
         mle_debug: bool = False
         mle_debug_gt_transform: Optional[torch.Tensor] = None
         # Sampler-specific configs (used when method="sampler")
@@ -80,6 +87,11 @@ class UnifiedConfig:
     mle_multi_init: bool = True
     mle_num_init: int = 5
     mle_top_k: int = 8
+    # Robust MLE options
+    mle_robust_kernel: str = "none"
+    mle_kernel_threshold: float = 0.1
+    mle_use_pca_init: bool = False
+    mle_pca_scale_range: tuple = (0.1, 10.0)
     mle_debug: bool = False
     mle_debug_gt_transform: Optional[torch.Tensor] = None
 
@@ -180,9 +192,11 @@ class UnifiedRegistration:
         grid_builder = CSRGridBuilder(grid_config)
         grid_data = grid_builder.build(scene)
 
-        # Create loss config with top_k
+        # Create loss config with robust kernel options
         loss_config = MLELossConfig(
             top_k=self.config.mle_top_k,
+            robust_kernel=self.config.mle_robust_kernel,
+            kernel_threshold=self.config.mle_kernel_threshold,
         )
 
         # Create registration config
@@ -197,6 +211,8 @@ class UnifiedRegistration:
             verbose=False,
             debug=self.config.mle_debug,
             debug_gt_transform=self.config.mle_debug_gt_transform,
+            use_pca_init=self.config.mle_use_pca_init,
+            pca_scale_range=self.config.mle_pca_scale_range,
         )
         self._mle_aligner = GMMRegistration(grid_data, loss_config=loss_config, reg_config=reg_config)
 
