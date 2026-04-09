@@ -1,7 +1,7 @@
 import taichi as ti
 import torch
 from misc.geometry import quaternion_to_rotation_ti
-from gmm_point_alignment.gs_scene_radius import approximate_chi_2_critical_value
+from .gs_scene_radius import approximate_chi_2_critical_value
 
 
 @ti.func
@@ -14,31 +14,38 @@ def gaussian_sphere_aabb(
 
     min_corner = center
     max_corner = center
-    
+
     rotation = quaternion_to_rotation_ti(quaternion.normalized())
-    
+
     sqrt_c = ti.sqrt(critical_value)
-    
+
     extents = ti.math.vec3([0.0, 0.0, 0.0])
-    
+
+    # Convert log scales to real scales
+    real_scales = ti.math.vec3([
+        ti.exp(scales[0]),
+        ti.exp(scales[1]),
+        ti.exp(scales[2])
+    ])
+
     for axis in ti.static(range(3)):
         L = 0.0
         for i in ti.static(range(3)):
             R_ai = rotation[axis, i]
-            L += R_ai * R_ai * scales[i] * scales[i]
-        
+            L += R_ai * R_ai * real_scales[i] * real_scales[i]
+
         half_extent = sqrt_c * ti.sqrt(L)
         extents[axis] = half_extent * 2.0
 
         min_corner[axis] -= half_extent
         max_corner[axis] += half_extent
-    
+
     # Sort extents in descending order (max, mid, min)
     sorted_extents = ti.math.vec3([0.0, 0.0, 0.0])
     sorted_extents[0] = ti.max(ti.max(extents[0], extents[1]), extents[2])
     sorted_extents[2] = ti.min(ti.min(extents[0], extents[1]), extents[2])
     sorted_extents[1] = extents[0] + extents[1] + extents[2] - sorted_extents[0] - sorted_extents[2]
-    
+
     return min_corner, max_corner, sorted_extents
 
 @ti.kernel
@@ -50,20 +57,20 @@ def gaussian_scene_aabb(
     min_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),    # [num_gaussians, 3]
     max_corners: ti.types.ndarray(dtype=ti.f32, ndim=2),    # [num_gaussians, 3]
     radius: ti.types.ndarray(dtype=ti.f32, ndim=2),         # [num_gaussians, 3]
-    confidence_level: float = 0.95
+    confidence_level: float,
 ):
-    critical_value = approximate_chi_2_critical_value(confidence_level)
+    critical_value = approximate_chi_2_critical_value(ti.cast(3, ti.i32), ti.cast(confidence_level, ti.f32))
     sphere_counts = centers.shape[0]
     
     for idx in range(sphere_counts):
         center = ti.math.vec3([
-            centers[idx][0], centers[idx][1], centers[idx][2]    
+            centers[idx, 0], centers[idx, 1], centers[idx, 2]
         ])
         scale = ti.math.vec3([
-            scales[idx][0], scales[idx][1], scales[idx][2]    
+            scales[idx, 0], scales[idx, 1], scales[idx, 2]
         ])
         quaternion = ti.math.vec4([
-            quaternions[idx][0], quaternions[idx][1], quaternions[idx][2], quaternions[idx][3]    
+            quaternions[idx, 0], quaternions[idx, 1], quaternions[idx, 2], quaternions[idx, 3]
         ])
         
         min_corner, max_corner, radius_values = gaussian_sphere_aabb(
@@ -74,9 +81,9 @@ def gaussian_scene_aabb(
         )
         
         for i in ti.static(range(3)):
-            radius[idx][i] = radius_values[i]
-            min_corners[idx][i] = min_corner[i]
-            max_corners[idx][i] = max_corner[i]
+            radius[idx, i] = radius_values[i]
+            min_corners[idx, i] = min_corner[i]
+            max_corners[idx, i] = max_corner[i]
             
 
 def global_scene_aabb(
