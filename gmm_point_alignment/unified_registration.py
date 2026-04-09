@@ -45,6 +45,7 @@ class UnifiedConfig:
         mle_use_scale: bool = False
         mle_multi_init: bool = True
         mle_num_init: int = 5
+        mle_top_k: int = 8
         mle_debug: bool = False
         mle_debug_gt_transform: Optional[torch.Tensor] = None
         # Sampler-specific configs (used when method="sampler")
@@ -66,6 +67,7 @@ class UnifiedConfig:
     mle_use_scale: bool = False
     mle_multi_init: bool = True
     mle_num_init: int = 5
+    mle_top_k: int = 8
     mle_debug: bool = False
     mle_debug_gt_transform: Optional[torch.Tensor] = None
 
@@ -129,6 +131,7 @@ class UnifiedRegistration:
             CSRGridBuilderConfig,
             VoxelSizeStrategy,
             GMMRegistration,
+            MLELossConfig,
             RegistrationConfig as MLERegistrationConfig,
         )
 
@@ -153,7 +156,12 @@ class UnifiedRegistration:
         grid_builder = CSRGridBuilder(grid_config)
         grid_data = grid_builder.build(scene)
 
-        # Create registration
+        # Create loss config with top_k
+        loss_config = MLELossConfig(
+            top_k=self.config.mle_top_k,
+        )
+
+        # Create registration config
         reg_config = MLERegistrationConfig(
             num_iters=self.config.mle_num_iters,
             lr=self.config.mle_lr,
@@ -166,7 +174,7 @@ class UnifiedRegistration:
             debug=self.config.mle_debug,
             debug_gt_transform=self.config.mle_debug_gt_transform,
         )
-        self._mle_aligner = GMMRegistration(grid_data, reg_config=reg_config)
+        self._mle_aligner = GMMRegistration(grid_data, loss_config=loss_config, reg_config=reg_config)
 
     def _init_sampler(self):
         """Initialize sampler registration components."""

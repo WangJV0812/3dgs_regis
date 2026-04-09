@@ -43,6 +43,31 @@ print(f"\nTrue transform:")
 print(f"  Translation: {t_true.cpu().numpy()}")
 print(f"  Rotation angle: {np.degrees(torch.acos((R_true.trace()-1)/2).item()):.2f}°")
 
+# =============================================================================
+# Build CSR Grid and Plot Sphere Distribution Histogram
+# =============================================================================
+
+print(f"\n{'=' * 70}")
+print("Building CSR Grid and Analyzing Sphere Distribution")
+print(f"{'=' * 70}")
+
+from gmm_point_alignment.mle_registration import CSRGridBuilder, CSRGridBuilderConfig
+
+grid_config = CSRGridBuilderConfig(
+    voxel_size_strategy="median_radius",
+    voxel_size_factor=1.0,
+)
+grid_builder = CSRGridBuilder(grid_config)
+grid_data = grid_builder.build(scene)
+
+# Plot spheres per voxel histogram
+grid_builder.plot_spheres_per_voxel_histogram(
+    grid_data,
+    output_path="spheres_per_voxel_histogram.png"
+)
+
+print(f"  Grid histogram saved to: spheres_per_voxel_histogram.png")
+
 # Test with debug mode enabled
 from gmm_point_alignment.unified_registration import (
     UnifiedRegistration,
@@ -58,9 +83,10 @@ config = UnifiedConfig(
     method=RegistrationMethod.MLE,
     mle_voxel_strategy="median_radius",
     mle_voxel_factor=0.5,
-    mle_num_iters=20000,
+    mle_num_iters=10000,
     mle_lr=0.001,
-    mle_lr_translation=0.0005,  # Much smaller LR for translation
+    mle_top_k=32,
+    mle_lr_translation=0.005,  # Much smaller LR for translation
     mle_lr_rotation=0.005,      # Larger LR for rotation
     mle_use_scale=True,
     mle_multi_init=True,

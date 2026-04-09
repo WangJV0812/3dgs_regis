@@ -244,7 +244,7 @@ class CSRGridQuerier:
         topk_densities = torch.cat(all_topk_densities, dim=0)
 
         elapsed = time() - start_time
-        print(f"[CSRQuerier] Query complete in {elapsed:.3f}s for {N} points")
+        # print(f"[CSRQuerier] Query complete in {elapsed:.3f}s for {N} points")
 
         return QueryResult(topk_sphere_ids=topk_ids, topk_densities=topk_densities)
 

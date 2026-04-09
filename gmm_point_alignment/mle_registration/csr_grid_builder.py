@@ -12,6 +12,7 @@ Example:
 
 import torch
 import taichi as ti
+import numpy as np
 from dataclasses import dataclass
 from typing import Tuple, Optional, List
 from time import time
@@ -310,8 +311,14 @@ class CSRGridBuilder(torch.nn.Module):
         print(f"[CSRGrid] Precomputing sphere covariance data...")
         cov_inv, norm_factor = self._precompute_sphere_data(scene)
 
-        # Count unique voxels
-        num_unique_voxels = len(torch.unique(pairs_morton))
+        # Count unique voxels and spheres per voxel
+        unique_mortons, inverse_indices, counts = torch.unique(
+            pairs_morton, return_inverse=True, return_counts=True
+        )
+        num_unique_voxels = len(unique_mortons)
+
+        # Compute spheres per voxel statistics
+        spheres_per_voxel = counts.cpu().numpy()
 
         elapsed = time() - start_time
         print(f"[CSRGrid] Build complete in {elapsed:.2f}s")
@@ -319,6 +326,9 @@ class CSRGridBuilder(torch.nn.Module):
         print(f"  - Unique voxels: {num_unique_voxels}")
         print(f"  - Oversized spheres: {len(oversized_ids)}")
         print(f"  - Voxel size: {voxel_size:.4f}")
+        print(f"  - Spheres per voxel: min={spheres_per_voxel.min()}, "
+              f"max={spheres_per_voxel.max()}, mean={spheres_per_voxel.mean():.2f}, "
+              f"median={np.median(spheres_per_voxel):.2f}")
 
         return CSRGridData(
             pairs_morton=pairs_morton,
@@ -606,6 +616,112 @@ class CSRGridBuilder(torch.nn.Module):
 
         return l1_offsets, l2_blocks
 
+    def plot_spheres_per_voxel_histogram(
+        self,
+        grid_data: CSRGridData,
+        output_path: str = "spheres_per_voxel_histogram.png",
+        max_bins: int = 100,
+    ):
+        """Plot histogram of sphere counts per voxel.
+
+        Args:
+            grid_data: CSR grid data from build()
+            output_path: Path to save the histogram plot
+            max_bins: Maximum number of bins for histogram
+        """
+        import matplotlib.pyplot as plt
+
+        # Get unique morton codes and their counts
+        unique_mortons, counts = torch.unique(
+            grid_data.pairs_morton, return_counts=True
+        )
+        spheres_per_voxel = counts.cpu().numpy()
+
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle("Spheres per Voxel Distribution", fontsize=14, fontweight='bold')
+
+        # Plot 1: Full histogram (with capped bins)
+        ax = axes[0, 0]
+        max_count = int(spheres_per_voxel.max())
+        bins = min(max_bins, max_count + 1)
+        ax.hist(spheres_per_voxel, bins=bins, edgecolor='black', alpha=0.7, color='steelblue')
+        ax.set_xlabel('Number of Spheres per Voxel')
+        ax.set_ylabel('Number of Voxels')
+        ax.set_title(f'Full Distribution (max={max_count})')
+        ax.grid(True, alpha=0.3)
+
+        # Add statistics text
+        stats_text = (
+            f"Total voxels: {len(spheres_per_voxel)}\n"
+            f"Mean: {spheres_per_voxel.mean():.2f}\n"
+            f"Median: {np.median(spheres_per_voxel):.2f}\n"
+            f"Std: {spheres_per_voxel.std():.2f}\n"
+            f"Min: {spheres_per_voxel.min()}\n"
+            f"Max: {spheres_per_voxel.max()}"
+        )
+        ax.text(
+            0.95, 0.95, stats_text,
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment='top',
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        )
+
+        # Plot 2: Zoomed histogram (capped at 95th percentile)
+        ax = axes[0, 1]
+        p95 = np.percentile(spheres_per_voxel, 95)
+        capped_data = spheres_per_voxel[spheres_per_voxel <= p95]
+        ax.hist(capped_data, bins=50, edgecolor='black', alpha=0.7, color='coral')
+        ax.set_xlabel('Number of Spheres per Voxel')
+        ax.set_ylabel('Number of Voxels')
+        ax.set_title(f'Distribution (≤95th percentile, ≤{p95:.1f})')
+        ax.grid(True, alpha=0.3)
+
+        # Plot 3: Log scale histogram
+        ax = axes[1, 0]
+        ax.hist(spheres_per_voxel, bins=bins, edgecolor='black', alpha=0.7, color='seagreen')
+        ax.set_xlabel('Number of Spheres per Voxel')
+        ax.set_ylabel('Number of Voxels (log scale)')
+        ax.set_yscale('log')
+        ax.set_title('Distribution (Log Scale)')
+        ax.grid(True, alpha=0.3, which='both')
+
+        # Plot 4: Cumulative distribution
+        ax = axes[1, 1]
+        sorted_counts = np.sort(spheres_per_voxel)
+        cumulative = np.arange(1, len(sorted_counts) + 1) / len(sorted_counts) * 100
+        ax.plot(sorted_counts, cumulative, linewidth=2, color='purple')
+        ax.set_xlabel('Number of Spheres per Voxel')
+        ax.set_ylabel('Cumulative Percentage (%)')
+        ax.set_title('Cumulative Distribution')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, np.percentile(sorted_counts, 99))
+
+        # Add percentile markers
+        for p in [50, 90, 95, 99]:
+            val = np.percentile(spheres_per_voxel, p)
+            ax.axvline(val, color='red', linestyle='--', alpha=0.5)
+            ax.annotate(f'{p}%\n({val:.1f})', xy=(val, p), fontsize=8, ha='center')
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"[CSRGrid] Saved spheres per voxel histogram to: {output_path}")
+        plt.close()
+
+    def get_spheres_per_voxel_counts(self, grid_data: CSRGridData) -> np.ndarray:
+        """Get the number of spheres per voxel as a numpy array.
+
+        Args:
+            grid_data: CSR grid data from build()
+
+        Returns:
+            Array of sphere counts per voxel
+        """
+        _, counts = torch.unique(grid_data.pairs_morton, return_counts=True)
+        return counts.cpu().numpy()
+
     def _decode_morton_batch(self, morton_codes: torch.Tensor) -> torch.Tensor:
         """Decode morton codes to grid coordinates (batch).
 
@@ -743,3 +859,7 @@ if __name__ == "__main__":
     print(f"  Unique voxels: {grid_data.num_unique_voxels}")
     print(f"  Voxel size: {grid_data.voxel_size:.4f}")
     print(f"  Oversized spheres: {len(grid_data.oversized_sphere_ids)}")
+
+    # Plot histogram
+    print("\nGenerating spheres per voxel histogram...")
+    builder.plot_spheres_per_voxel_histogram(grid_data, output_path="spheres_per_voxel_histogram.png")

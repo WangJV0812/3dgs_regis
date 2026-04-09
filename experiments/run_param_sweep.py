@@ -65,7 +65,7 @@ class ExperimentResult:
 def setup_data():
     """Load and prepare test data."""
     # Load scene
-    hier_path = Path('../data/merged.hier')
+    hier_path = Path('./data/merged.hier')
     hier_scene = load_hier_to_torch(hier_path, device=device)
     scene = hier_scene.gaussian_scene
 
