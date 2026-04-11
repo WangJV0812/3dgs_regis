@@ -1,6 +1,6 @@
 import argparse
 import pandas as pd
-from taichi_3d_gaussian_splatting.GaussianPointCloudScene import GaussianPointCloudScene
+from submodule.taichi_3d_gaussian_splatting.taichi_3d_gaussian_splatting.GaussianPointCloudScene import GaussianPointCloudScene
 
 def save_ply(pointcloud):
     print(pointcloud.head())

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 import json
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from misc.hier_IO import load_hier_to_torch
 from gmm_point_alignment.csr_grid_builder import CSRGridBuilder

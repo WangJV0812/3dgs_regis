@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import argparse
-from taichi_3d_gaussian_splatting.GaussianPointTrainer import GaussianPointCloudTrainer
+from submodule.taichi_3d_gaussian_splatting.taichi_3d_gaussian_splatting.GaussianPointTrainer import GaussianPointCloudTrainer
 
 if __name__ == "__main__":
     plt.switch_backend("agg")

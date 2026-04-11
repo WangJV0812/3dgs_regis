@@ -54,22 +54,22 @@ pip install -e taichi_3d_gaussian_splatting/
 python -m pytest tests/ -v
 
 # Run a specific test file
-python -m pytest tests/test_csr_grid_builder.py -v
-python -m pytest tests/test_morton_code.py -v
-python -m pytest tests/test_phase3b_registration.py -v
+python -m pytest tests/unit/test_csr_grid_builder.py -v
+python -m pytest tests/unit/test_morton_code.py -v
+python -m pytest tests/integration/test_registration.py -v
 
 # Run the unified registration test with real data
-python test_unified_with_real_data.py
+python tests/scripts/test_unified_registration.py
 
 # Run MLE debug test
-python test_mle_debug.py
+python tests/scripts/test_mle_debug.py
 ```
 
 ### Running Registration
 
 ```bash
 # Unified registration test (compares MLE vs Sampler methods)
-python test_unified_with_real_data.py
+python tests/scripts/test_unified_registration.py
 
 # Visualization of registration results
 python visualize_registration.py

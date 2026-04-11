@@ -311,7 +311,7 @@ class TestGMMPointAlignmentWithRealData:
     @pytest.fixture
     def real_data(self):
         """Load real data if available."""
-        data_dir = Path(__file__).parent.parent / "data"
+        data_dir = Path(__file__).parent.parent.parent / "data"
         hier_path = data_dir / "merged.hier"
         ply_path = data_dir / "points3D.ply"
 
@@ -319,7 +319,7 @@ class TestGMMPointAlignmentWithRealData:
             pytest.skip("Real data not available")
 
         from misc.hier_IO import load_hier_to_torch
-        from tests.test_phase3c_integration import read_ply_xyz
+        from tests.utils import read_ply_xyz
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

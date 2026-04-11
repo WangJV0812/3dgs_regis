@@ -2,11 +2,11 @@
 """Test MLE registration with debug visualization."""
 
 import sys
-sys.path.insert(0, '.')
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import torch
 import numpy as np
-from pathlib import Path
 
 import taichi as ti
 ti.init(arch=ti.cuda)
@@ -15,7 +15,7 @@ device = 'cuda'
 
 # Load data
 from misc.hier_IO import load_hier_to_torch
-hier_path = Path('data/merged.hier')
+hier_path = Path(__file__).parent.parent.parent / 'data' / 'merged.hier'
 hier_scene = load_hier_to_torch(hier_path, device=device)
 scene = hier_scene.gaussian_scene
 

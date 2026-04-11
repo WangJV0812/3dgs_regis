@@ -17,7 +17,7 @@ from gmm_point_alignment.csr_grid_querier import CSRGridQuerier, CSRGridQuerierC
 
 
 # Path to test data
-DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR = Path(__file__).parent.parent.parent / "data"
 HIER_PATH = DATA_DIR / "merged.hier"
 
 

@@ -7,11 +7,11 @@ Uses:
 """
 
 import sys
-sys.path.insert(0, '.')
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import torch
 import numpy as np
-from pathlib import Path
 from time import time
 
 import taichi as ti
@@ -29,7 +29,7 @@ print("=" * 70)
 
 # Load Gaussian scene
 from misc.hier_IO import load_hier_to_torch
-hier_path = Path('data/merged.hier')
+hier_path = Path(__file__).parent.parent.parent / 'data' / 'merged.hier'
 hier_scene = load_hier_to_torch(hier_path, device=device)
 scene = hier_scene.gaussian_scene
 
@@ -38,71 +38,10 @@ print(f"  Spheres: {len(scene.position)}")
 print(f"  Position range: [{scene.position.min().item():.2f}, {scene.position.max().item():.2f}]")
 print(f"  Scale range: [{scene.scales.min().item():.2f}, {scene.scales.max().item():.2f}]")
 
-# Load point cloud from PLY
-def read_ply_xyz(ply_path: Path) -> torch.Tensor:
-    """Simple binary PLY reader that extracts XYZ coordinates."""
-    with open(ply_path, 'rb') as f:
-        # Parse header
-        line = f.readline().decode('ascii').strip()
-        assert line == "ply", f"Not a PLY file: {line}"
+from tests.utils import read_ply_xyz
 
-        vertex_count = None
-        properties = []
-        format_type = None
-
-        while True:
-            line = f.readline().decode('ascii').strip()
-            if line.startswith("format"):
-                parts = line.split()
-                format_type = parts[1]
-            elif line.startswith("element vertex"):
-                vertex_count = int(line.split()[2])
-            elif line.startswith("property"):
-                parts = line.split()
-                if len(parts) >= 3:
-                    properties.append((parts[1], parts[2]))
-            elif line == "end_header":
-                break
-
-        assert vertex_count is not None
-        assert format_type == "binary_little_endian"
-
-        # Find XYZ property indices
-        xyz_indices = []
-        for i, (dtype, name) in enumerate(properties):
-            if name in ['x', 'y', 'z']:
-                xyz_indices.append(i)
-
-        dtype_map = {
-            'char': 1, 'uchar': 1, 'short': 2, 'ushort': 2,
-            'int': 4, 'uint': 4, 'float': 4, 'double': 8,
-            'float32': 4, 'float64': 8, 'int32': 4, 'uint32': 4,
-        }
-
-        prop_sizes = [dtype_map.get(dtype, 4) for dtype, _ in properties]
-        vertex_stride = sum(prop_sizes)
-        data = f.read()
-
-    # Extract XYZ coordinates
-    points = np.zeros((vertex_count, 3), dtype=np.float32)
-    xyz_offsets = [sum(prop_sizes[:i]) for i in xyz_indices]
-
-    for i in range(vertex_count):
-        offset = i * vertex_stride
-        for j, (prop_idx, prop_offset) in enumerate(zip(xyz_indices, xyz_offsets)):
-            prop_dtype = properties[prop_idx][0]
-            if prop_dtype in ['float', 'float32']:
-                val = np.frombuffer(data[offset + prop_offset:offset + prop_offset + 4], dtype=np.float32)[0]
-            elif prop_dtype == 'double':
-                val = np.frombuffer(data[offset + prop_offset:offset + prop_offset + 8], dtype=np.float64)[0]
-            else:
-                continue
-            points[i, j] = val
-
-    return torch.from_numpy(points).to(device)
-
-ply_path = Path('data/points3D.ply')
-pointcloud = read_ply_xyz(ply_path)
+ply_path = Path(__file__).parent.parent.parent / 'data' / 'points3D.ply'
+pointcloud = read_ply_xyz(ply_path).to(device)
 
 print(f"\nLoaded point cloud:")
 print(f"  Points: {len(pointcloud)}")

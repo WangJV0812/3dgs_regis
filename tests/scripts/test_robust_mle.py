@@ -10,11 +10,11 @@ Compares:
 """
 
 import sys
-sys.path.insert(0, '.')
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import torch
 import numpy as np
-from pathlib import Path
 from time import time
 
 import taichi as ti
@@ -31,53 +31,15 @@ print("Robust MLE Registration Test")
 print("=" * 70)
 
 from misc.hier_IO import load_hier_to_torch
-hier_path = Path('data/merged.hier')
+hier_path = Path(__file__).parent.parent.parent / 'data' / 'merged.hier'
 hier_scene = load_hier_to_torch(hier_path, device=device)
 scene = hier_scene.gaussian_scene
 
 print(f"\nLoaded Gaussian scene: {len(scene.position)} spheres")
 
-# Load point cloud
-def read_ply_xyz(ply_path: Path) -> torch.Tensor:
-    with open(ply_path, 'rb') as f:
-        line = f.readline().decode('ascii').strip()
-        assert line == "ply"
-        vertex_count = None
-        properties = []
-        format_type = None
-        while True:
-            line = f.readline().decode('ascii').strip()
-            if line.startswith("format"):
-                format_type = line.split()[1]
-            elif line.startswith("element vertex"):
-                vertex_count = int(line.split()[2])
-            elif line.startswith("property"):
-                parts = line.split()
-                if len(parts) >= 3:
-                    properties.append((parts[1], parts[2]))
-            elif line == "end_header":
-                break
-        dtype_map = {'char': 1, 'uchar': 1, 'short': 2, 'ushort': 2, 'int': 4, 'uint': 4, 'float': 4, 'double': 8, 'float32': 4, 'float64': 8, 'int32': 4, 'uint32': 4}
-        prop_sizes = [dtype_map.get(dtype, 4) for dtype, _ in properties]
-        vertex_stride = sum(prop_sizes)
-        data = f.read()
-        xyz_indices = [i for i, (_, name) in enumerate(properties) if name in ['x', 'y', 'z']]
-        xyz_offsets = [sum(prop_sizes[:i]) for i in xyz_indices]
-        points = np.zeros((vertex_count, 3), dtype=np.float32)
-        for i in range(vertex_count):
-            offset = i * vertex_stride
-            for j, (prop_idx, prop_offset) in enumerate(zip(xyz_indices, xyz_offsets)):
-                prop_dtype = properties[prop_idx][0]
-                if prop_dtype in ['float', 'float32']:
-                    val = np.frombuffer(data[offset + prop_offset:offset + prop_offset + 4], dtype=np.float32)[0]
-                elif prop_dtype == 'double':
-                    val = np.frombuffer(data[offset + prop_offset:offset + prop_offset + 8], dtype=np.float64)[0]
-                else:
-                    continue
-                points[i, j] = val
-    return torch.from_numpy(points).to(device)
+from tests.utils import read_ply_xyz
 
-ply_path = Path('data/points3D.ply')
+ply_path = Path(__file__).parent.parent.parent / 'data' / 'points3D.ply'
 pointcloud = read_ply_xyz(ply_path)
 
 # Sample for faster processing
