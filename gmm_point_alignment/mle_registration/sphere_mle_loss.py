@@ -81,37 +81,56 @@ class MLEAlignmentLoss(nn.Module):
         else:
             self.has_opacities = False
 
-    def _apply_robust_kernel(self, nll: torch.Tensor) -> torch.Tensor:
-        """Apply robust kernel to negative log-likelihood.
+    def _apply_robust_kernel_to_mahalanobis(
+        self,
+        mahalanobis: torch.Tensor,
+        valid_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply robust kernel to Mahalanobis distances.
+
+        Robust kernels reduce the influence of large distances (outliers)
+        by down-weighting them in the loss computation.
 
         Args:
-            nll: Raw NLL values [N]
+            mahalanobis: Squared Mahalanobis distances [N, K]
+            valid_mask: Valid association mask [N, K]
 
         Returns:
-            Robust NLL values [N]
+            Robustified squared Mahalanobis distances [N, K]
         """
         kernel = self.config.robust_kernel
         c = self.config.kernel_threshold
 
         if kernel == "none" or c <= 0:
-            return nll
-        elif kernel == "huber":
-            # Huber loss: quadratic for small values, linear for large
-            mask = nll <= c
-            robust_nll = torch.where(
-                mask,
-                nll,  # quadratic region
-                2 * c * torch.sqrt(nll) - c  # linear region
+            return mahalanobis
+
+        # Apply kernel only to valid entries
+        m = mahalanobis * valid_mask
+
+        if kernel == "huber":
+            # Huber: quadratic for small distances, linear for large
+            # For squared Mahalanobis: if d <= c^2, use d; else use 2*c*sqrt(d) - c^2
+            c_sq = c ** 2
+            mask = m <= c_sq
+            robust_m = torch.where(
+                mask | (~valid_mask.bool()),
+                m,
+                2 * c * torch.sqrt(m.clamp(min=1e-8)) - c_sq
             )
-            return robust_nll
         elif kernel == "cauchy":
-            # Cauchy loss: c^2 * log(1 + (x/c)^2)
-            return c**2 * torch.log(1 + nll / (c**2))
+            # Cauchy: c^2 * log(1 + d/c^2)
+            # This heavily down-weights large distances
+            c_sq = c ** 2
+            robust_m = c_sq * torch.log(1 + m / (c_sq + 1e-8))
         elif kernel == "geman_mcclure":
-            # Geman-McClure: x^2 / (c^2 + x^2) * c^2
-            return nll * c**2 / (c**2 + nll)
+            # Geman-McClure: d / (1 + d/c^2) = d * c^2 / (c^2 + d)
+            # This creates a hard outlier rejection effect
+            c_sq = c ** 2
+            robust_m = m * c_sq / (c_sq + m + 1e-8)
         else:
-            return nll
+            return mahalanobis
+
+        return robust_m * valid_mask + mahalanobis * (1 - valid_mask)
 
     def forward(
         self,
@@ -204,9 +223,15 @@ class MLEAlignmentLoss(nn.Module):
         temp = torch.einsum('nkij,nkj->nki', cov_inv, diff)  # [N, K, 3]
         mahalanobis = (diff * temp).sum(dim=-1)  # [N, K]
 
-        # Log densities
+        # Create mask for valid associations (sphere_id >= 0)
+        valid_mask = (sphere_ids >= 0).float()  # [N, K]
+
+        # Apply robust kernel to Mahalanobis distances
+        mahalanobis_robust = self._apply_robust_kernel_to_mahalanobis(mahalanobis, valid_mask)
+
+        # Log densities (using robustified Mahalanobis distances)
         log_norm = self.log_norm_factors[sphere_ids_clamped]  # [N, K]
-        log_densities = -0.5 * mahalanobis + log_norm  # [N, K]
+        log_densities = -0.5 * mahalanobis_robust + log_norm  # [N, K]
 
         # Create mask for valid associations (sphere_id >= 0)
         valid_mask = (sphere_ids >= 0).float()  # [N, K]
@@ -235,9 +260,6 @@ class MLEAlignmentLoss(nn.Module):
         # Handle points with no valid associations
         has_valid = (valid_mask.sum(dim=-1) > 0).float()  # [N]
         nll = nll * has_valid + (1 - has_valid) * 1000  # Large penalty for no association
-
-        # Apply robust kernel
-        nll = self._apply_robust_kernel(nll)
 
         # Apply point confidence weights
         if point_confidence is not None and self.config.use_point_confidence:
@@ -426,8 +448,21 @@ class GMMRegistration:
 
         # Initialize parameters
         if self.config.use_scale:
-            # Extract initial scale from transform if not identity
-            xi, log_scale = sim3_log(initial_transform)
+            # Extract initial scale from transform
+            # Check if transform contains scale by computing det of rotation part
+            R_part = initial_transform[:3, :3]
+            det_R = torch.det(R_part)
+            scale_from_R = torch.pow(torch.abs(det_R), 1.0/3.0)
+
+            # If scale is close to 1.0, treat as SE(3); otherwise extract Sim(3)
+            if abs(scale_from_R.item() - 1.0) < 0.01:
+                # Treat as SE(3) - start from identity scale
+                xi = se3_log(initial_transform)
+                log_scale = torch.tensor(0.0, device=device)  # log(1.0) = 0
+            else:
+                # Treat as Sim(3) - extract scale
+                xi, log_scale = sim3_log(initial_transform)
+
             xi = xi.clone().detach().requires_grad_(True)
             log_scale = log_scale.clone().detach().requires_grad_(True)
             params = [xi, log_scale]
@@ -447,7 +482,9 @@ class GMMRegistration:
         lr_r = getattr(self.config, 'lr_rotation', self.config.lr * 0.1)
 
         if self.config.use_scale:
-            log_scale = log_scale.clone().detach().requires_grad_(True)
+            # log_scale is already created above, just ensure it has grad
+            if not log_scale.requires_grad:
+                log_scale = log_scale.clone().detach().requires_grad_(True)
             optimizer = torch.optim.Adam([
                 {'params': [xi_t], 'lr': lr_t},
                 {'params': [xi_r], 'lr': lr_r},
@@ -772,7 +809,7 @@ class GMMRegistration:
 
         # Compute covariance matrices
         p_cov = p_centered.T @ p_centered / points.shape[0]
-        s_cov = s_centered.T @ scene_centers / scene_centers.shape[0]
+        s_cov = s_centered.T @ s_centered / scene_centers.shape[0]
 
         # Eigendecomposition
         p_eigvals, p_eigvecs = torch.linalg.eigh(p_cov)
@@ -788,9 +825,19 @@ class GMMRegistration:
         p_eigvals = p_eigvals[p_idx]
         s_eigvals = s_eigvals[s_idx]
 
-        # Estimate scale from eigenvalue ratios
-        # Use the largest eigenvalue ratio as scale estimate
-        scale_estimate = torch.sqrt(s_eigvals[0] / (p_eigvals[0] + 1e-8))
+        # Estimate scale using bounding box diagonal (more robust than eigenvalue ratio)
+        # This accounts for the overall spatial extent of the point clouds
+        p_bbox = points.max(dim=0)[0] - points.min(dim=0)[0]
+        s_bbox = scene_centers.max(dim=0)[0] - scene_centers.min(dim=0)[0]
+
+        p_extent = torch.norm(p_bbox)
+        s_extent = torch.norm(s_bbox)
+
+        if p_extent > 1e-6:
+            scale_estimate = s_extent / p_extent
+        else:
+            # Fallback to eigenvalue ratio if bounding box is degenerate
+            scale_estimate = torch.sqrt(s_eigvals[0] / (p_eigvals[0] + 1e-8))
 
         # Clamp scale to reasonable range
         scale_min, scale_max = self.config.pca_scale_range

@@ -1,0 +1,6 @@
+[submodule "submodule/vggt"]
+	path = submodule/vggt
+	url = https://github.com/facebookresearch/vggt.git
+[submodule "submodule/hier_3dgs"]
+	path = submodule/hier_3dgs
+	url = https://github.com/WangJV0812/3dgs_merge_tree_builder.git
