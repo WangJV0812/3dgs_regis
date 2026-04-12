@@ -138,7 +138,7 @@ def run_vggt_reconstruction(scene_dir: Path, use_ba: bool = False,
     if not image_dir.exists():
         raise FileNotFoundError(f"Image directory not found: {image_dir}")
 
-    vggt_result_dir = scene_dir / "vggt_result"
+    vggt_result_dir = scene_dir / "vggt_result" / str(seed)
     sparse_dir = vggt_result_dir / "sparse"
     vggt_result_dir.mkdir(parents=True, exist_ok=True)
     sparse_dir.mkdir(parents=True, exist_ok=True)
@@ -153,12 +153,16 @@ def run_vggt_reconstruction(scene_dir: Path, use_ba: bool = False,
 
     n_total = len(image_path_list)
 
-    # Uniform frame sampling for memory control
+    # Set seed early so frame sampling is reproducible
+    set_seed(seed)
+
+    # Random consecutive frame sampling for memory control
     if max_frames is not None and n_total > max_frames:
-        stride = n_total / max_frames
-        indices = [min(int(i * stride), n_total - 1) for i in range(max_frames)]
+        start_idx = random.randint(0, n_total - max_frames)
+        indices = list(range(start_idx, start_idx + max_frames))
         image_path_list = [image_path_list[i] for i in indices]
-        print(f"  !! Frame limit active: sampled {len(image_path_list)} / {n_total} images (stride={stride:.1f})")
+        print(f"  !! Frame limit active: sampled {len(image_path_list)} consecutive frames "
+              f"starting at index {start_idx} / {n_total}")
 
     base_image_path_list = [os.path.basename(p) for p in image_path_list]
 
@@ -175,9 +179,6 @@ def run_vggt_reconstruction(scene_dir: Path, use_ba: bool = False,
 
     print(f"\nDevice: {device}")
     print(f"Dtype: {dtype}")
-
-    # Set seed
-    set_seed(seed)
 
     # Load VGGT model
     print("\n[1/3] Loading VGGT model...")
@@ -444,7 +445,7 @@ def main():
     parser.add_argument("--max_query_pts", type=int, default=4096,
                         help="Maximum number of query points")
     parser.add_argument("--max_frames", type=int, default=None,
-                        help="Maximum frames to process (uniformly sampled). Recommended: 50 for 8GB, 80 for 16GB, 100 for 24GB VRAM")
+                        help="Maximum frames to process (random consecutive window). Recommended: 50 for 8GB, 80 for 16GB, 100 for 24GB VRAM")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
 

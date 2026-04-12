@@ -34,8 +34,7 @@ scene_dir/
 │   ├── model/
 │   │   ├── final.hier       # Final trained 3DGS model
 │   │   └── ckpt/            # Training checkpoints
-│   ├── render/              # Rendered validation images
-│   └── log/                 # Training logs
+│   ├── render/              # Rendered validation imagz   └── log/                 # Training logs
 └── config.json              # Dataset configuration
 ```
 

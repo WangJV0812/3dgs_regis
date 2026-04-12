@@ -118,13 +118,16 @@ def _write_train_test_split(sparse_dir: Path, image_names: list[str]):
           f"{len(test_names)} test")
 
 
-def prepare_dataset_structure(scene_dir: Path, source: str):
+def prepare_dataset_structure(scene_dir: Path, source: str, seed: int = 42):
     """
     Ensure the source_result_dir matches HIER 3DGS expectations.
     Returns (source_result_dir, sparse_dir).
     """
     input_dir = scene_dir / "input" / "images"
-    source_result_dir = scene_dir / f"{source}_result"
+    if source == "vggt":
+        source_result_dir = scene_dir / f"{source}_result" / str(seed)
+    else:
+        source_result_dir = scene_dir / f"{source}_result"
     sparse_dir = source_result_dir / "sparse"
 
     if not input_dir.exists():
@@ -254,11 +257,15 @@ def train_hier_3dgs(
     disable_viewer: bool = True,
     build_hierarchy: bool = False,
     post_opt: bool = False,
+    seed: int = 42,
 ):
     """Train HIER 3DGS model."""
-    source_path, _ = prepare_dataset_structure(scene_dir, source)
+    source_path, _ = prepare_dataset_structure(scene_dir, source, seed=seed)
 
-    result_dir = scene_dir / "3dgs_result"
+    if source == "vggt":
+        result_dir = scene_dir / "3dgs_result" / str(seed)
+    else:
+        result_dir = scene_dir / "3dgs_result"
     model_dir = result_dir / "model"
     ckpt_dir = model_dir / "ckpt"
     log_dir = result_dir / "log"
@@ -400,9 +407,12 @@ def train_hier_3dgs(
     return model_dir
 
 
-def validate_source(scene_dir: Path, source: str):
+def validate_source(scene_dir: Path, source: str, seed: int = 42):
     """Validate that source reconstruction exists and is valid."""
-    source_result_dir = scene_dir / f"{source}_result"
+    if source == "vggt":
+        source_result_dir = scene_dir / f"{source}_result" / str(seed)
+    else:
+        source_result_dir = scene_dir / f"{source}_result"
     sparse_dir = source_result_dir / "sparse"
 
     if not source_result_dir.exists():
@@ -481,6 +491,10 @@ def main():
         help="Run post-optimization on hierarchy "
              "(requires --build_hierarchy)"
     )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for locating VGGT result subdirectory (vggt_result/<seed>)"
+    )
 
     args = parser.parse_args()
 
@@ -492,7 +506,7 @@ def main():
     scene_dir = Path(args.scene_dir).resolve()
 
     try:
-        validate_source(scene_dir, args.source)
+        validate_source(scene_dir, args.source, seed=args.seed)
         train_hier_3dgs(
             scene_dir=scene_dir,
             source=args.source,
@@ -505,6 +519,7 @@ def main():
             disable_viewer=not args.enable_viewer,
             build_hierarchy=args.build_hierarchy,
             post_opt=args.post_opt,
+            seed=args.seed,
         )
     except Exception as exc:
         print(f"\nError: {exc}", file=sys.stderr)
